@@ -1,0 +1,24 @@
+<Input LULC>
+C:/Users/10421/Desktop/testdata/t4/expansion_output_landuse_1to2.tif
+<Input Feature folder>
+C:/Users/10421/Desktop/testdata/drivingfactors
+<Output probability>
+C:/Users/10421/Desktop/testdata/t4/potential.tif
+<Is net exit?>
+0
+<Input sampling rate>
+0.01
+<mTry>
+16
+<Input the number of trees>
+20
+<Is balance?>
+0
+<Input thread count>
+8
+<High precision>
+0
+<Update Number>
+0
+<Update Variable>
+0

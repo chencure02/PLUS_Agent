@@ -1,0 +1,13 @@
+server:
+  port: 7851
+  tomcat:
+    max-http-form-post-size: 9000000
+    max-connections: 30000
+    connection-timeout: 12000
+
+
+spring:
+  servlet:
+    multipart:
+      max-file-size: 100MB
+      max-request-size: 100MB

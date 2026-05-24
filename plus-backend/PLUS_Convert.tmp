@@ -1,0 +1,8 @@
+<Input number>
+2
+<Input LULC series>
+C:\Users\10421\Desktop\testdata\PLUS_test_data\PLUS_test_data\LULCs\wh2003_refy.tif
+C:\Users\10421\Desktop\testdata\PLUS_test_data\PLUS_test_data\LULCs\wh2013_refy.tif
+<Output LULC series>
+C:\Users\10421\Desktop\testdata\t4\wh2003_converted.tif
+C:\Users\10421\Desktop\testdata\t4\wh2013_converted.tif

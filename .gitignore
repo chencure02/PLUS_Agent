@@ -1,0 +1,32 @@
+# API keys & secrets
+.env
+
+# Claude internal files
+.files/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Runtime data
+data/*.db
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Chainlit auto-generated translations
+.chainlit/translations/
