@@ -26,7 +26,7 @@ class LEASTool(BaseTool):
     def execute(self, params: dict) -> ToolResult:
         tmp = (
             f"<Input LULC>\n{params['input_lulc']}\n"
-            f"<Input Feature folder>\n{params['feature_folder']}\n"
+            f"<Input Featrue folder>\n{params['feature_folder']}\n"
             f"<Output probability>\n{params['output_probability']}\n"
             f"<Is net exit?>\n0\n"
             f"<Input sampling rate>\n{params.get('sampling_rate', 0.01)}\n"
