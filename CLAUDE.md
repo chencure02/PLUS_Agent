@@ -74,7 +74,7 @@ plus-backend/
 | 参数 | 说明 |
 |------|------|
 | `Input LULC` | 用地扩张提取结果图,一般采用`expansion`模块的输出 |
-| `Input Feature folder` | 驱动因子文件夹路径 |
+| `Input Featrue folder` | 驱动因子文件夹路径 |
 | `Output probability` | 输出的概率图文件路径（多波段，每波段对应一种用地类型的发生概率） |
 | `Is net exit?` | 是否计算净变化（0=总变化, 1=净变化），默认为0，该参数任何时候都不做改动 |
 | `Input sampling rate` | 随机森林采样率（默认 0.01 = 1%） |
