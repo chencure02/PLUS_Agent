@@ -1,6 +1,6 @@
 <Input LULC>
 C:/Users/10421/Desktop/testdata/t4/expansion_output_landuse_1to2.tif
-<Input Feature folder>
+<Input Featrue folder>
 C:/Users/10421/Desktop/testdata/drivingfactors
 <Output probability>
 C:/Users/10421/Desktop/testdata/t4/potential.tif
