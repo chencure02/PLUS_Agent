@@ -23,7 +23,7 @@ class BaseLLM(ABC):
 
 
 def create_llm(backend: str, config: dict) -> BaseLLM:
-    valid_backends = {"claude", "openai", "deepseek", "qwen-compat"}
+    valid_backends = {"claude", "openai", "deepseek", "qwen"}
     if backend not in valid_backends:
         raise ValueError(
             f"Unknown LLM backend: {backend!r}. "

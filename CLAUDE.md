@@ -90,7 +90,7 @@ plus-backend/
 - n张概率图，n代表所运行的数据有n种土地利用类型。例如当写定输出的概率图文件路径为：C:\Users\10421\Desktop\testdata\t1\potential.tif，此时将在t1文件夹内输出n个命名为potential_band_n.tif的概率图
 - `accuracy_record_rf.txt` — 各用地类型的 RF 精度
 - `imageminmax.txt` — 驱动因子归一化范围记录
-
+- `Contribution*.csv`-*张csv表格文件，*同样为土地利用类型数量，表格记录了所有土地利用类型的驱动因素的贡献度。
 ---
 
 ### 4. Markov — 马尔科夫链预测

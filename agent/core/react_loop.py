@@ -22,20 +22,22 @@ _IMMUTABLE_PARAMS = {
 
 def _build_confirm_text(tool_name: str, props: dict, user_params: dict) -> str:
     """Build a readable parameter summary for user confirmation."""
-    required = props.get("required", [])
-    lines = [f"**{tool_name}** — review parameters before execution:\n"]
+    lines = [f"**{tool_name}** — 执行前确认参数：\n"]
     for name, pinfo in props.get("properties", {}).items():
         if name in _IMMUTABLE_PARAMS:
             continue
         val = user_params.get(name)
-        is_required = name in required
         has_default = "default" in pinfo
-        marker = "[required]" if is_required else "[optional]"
-        # Indicate source: user-specified or using default
-        source = " (default)" if (has_default and val == pinfo.get("default")) else ""
-        display_val = f"`{val}`" if val not in (None, "", []) else "`<not set>`"
-        lines.append(f"- {marker} **{name}**: {display_val}{source}  — {pinfo.get('description', '')[:80]}")
-    lines.append("\nReply **ok** to proceed, or specify changes like `param=value, ...`")
+        using_default = has_default and val == pinfo.get("default")
+        # Format value display
+        if val in (None, "", []):
+            display_val = "`<未设置>`"
+        else:
+            display_val = f"`{val}`"
+        # Mark default values
+        default_mark = " （默认）" if using_default else ""
+        lines.append(f"- **{name}** = {display_val}{default_mark}")
+    lines.append("\n回复 **ok** 继续执行，或输入 `参数=新值, ...` 修改")
     return "\n".join(lines)
 
 

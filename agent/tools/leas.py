@@ -8,7 +8,7 @@ from agent.config import PLUS_BACKEND
 
 class LEASTool(BaseTool):
     name = "leas"
-    description = "Land Expansion Analysis Strategy. Uses Random Forest with driving factors to generate per-class land use occurrence probability maps. Input: expansion map + driving factors folder + RF parameters."
+    description = "Land Expansion Analysis Strategy. Uses Random Forest with driving factors to generate per-class land use occurrence probability maps and Contribution*.csv factor importance tables. Input: expansion map + driving factors folder + RF parameters."
     parameters = {
         "type": "object",
         "properties": {
@@ -46,12 +46,22 @@ class LEASTool(BaseTool):
         dir_name = os.path.abspath(dir_name)
         base_name = os.path.splitext(os.path.basename(base))[0]
         outputs = []
+
+        # Accuracy and normalization records
         for f in [str(PLUS_BACKEND / "accuracy_record_rf.txt"), str(PLUS_BACKEND / "imageminmax.txt")]:
             if os.path.exists(f):
                 outputs.append(f)
 
+        # Probability bands
         pattern = os.path.join(dir_name, f"{base_name}_band_*.tif")
         bands = sorted(glob_mod.glob(pattern))
         outputs.extend(bands)
+
+        # Driving factor contribution CSVs (one per land use type)
+        for f in sorted(glob_mod.glob(str(PLUS_BACKEND / "Contribution*.csv"))):
+            if os.path.exists(f):
+                outputs.append(f)
+
         band_count = len(bands)
-        return ToolResult(success=True, message=f"LEAS: {band_count} probability bands generated", output_paths=outputs)
+        csv_count = len([o for o in outputs if "Contribution" in o])
+        return ToolResult(success=True, message=f"LEAS: {band_count} probability bands, {csv_count} contribution tables generated", output_paths=outputs)

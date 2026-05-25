@@ -6,7 +6,7 @@ Usage:
     chainlit run agent/main.py
 
 Environment variables:
-    PLUS_LLM_BACKEND  - LLM backend: claude (default), openai, deepseek, qwen-compat
+    PLUS_LLM_BACKEND  - LLM backend: claude (default), openai, deepseek, qwen
     PLUS_MEMORY_DB    - SQLite database path (default: PROJECT_ROOT/data/memory.db)
     ANTHROPIC_API_KEY - Claude API key
     OPENAI_API_KEY    - OpenAI API key
@@ -16,6 +16,10 @@ Environment variables:
 import os
 import sys
 from pathlib import Path
+
+# Force matplotlib non-interactive backend BEFORE any other imports
+# Prevents tkinter crash when rendering charts in Chainlit's async context
+os.environ.setdefault("MPLBACKEND", "Agg")
 
 # Ensure project root is on Python path so `agent` package is importable
 _project_root = Path(__file__).resolve().parent.parent

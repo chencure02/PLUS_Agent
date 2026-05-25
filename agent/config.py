@@ -29,8 +29,8 @@ LLM_CONFIG = {
         "api_key_env": "DEEPSEEK_API_KEY",
         "base_url": "https://api.deepseek.com/v1",
     },
-    "qwen-compat": {
-        "model": "qwen-max",
+    "qwen": {
+        "model": os.getenv("QWEN_MODEL", "qwen-max"),
         "api_key_env": "DASHSCOPE_API_KEY",
         "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
     },
