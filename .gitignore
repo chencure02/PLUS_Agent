@@ -24,6 +24,18 @@ env/
 # Runtime data
 data/*.db
 
+# User uploads (keep dirs, ignore content)
+uploads/lulc/*
+uploads/drivers/*
+uploads/constraints/*
+!uploads/lulc/.gitkeep
+!uploads/drivers/.gitkeep
+!uploads/constraints/.gitkeep
+
+# Outputs (keep dir, ignore content)
+outputs/*
+!outputs/.gitkeep
+
 # OS files
 .DS_Store
 Thumbs.db

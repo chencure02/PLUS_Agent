@@ -16,6 +16,7 @@ class BaseTool(ABC):
     name: str = ""
     description: str = ""
     parameters: dict = {}
+    confirm_before_execute: bool = True  # False = skip parameter confirmation
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)

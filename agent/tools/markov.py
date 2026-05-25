@@ -1,4 +1,5 @@
-# agent/tools/markov.py
+import csv
+import os
 from agent.tools.base import BaseTool, ToolResult
 from agent.tools import write_tmp, run_bat
 from agent.config import CPP_DIR
@@ -6,7 +7,7 @@ from agent.config import CPP_DIR
 
 class MarkovTool(BaseTool):
     name = "markov"
-    description = "Predict future land use demand quantities using Markov chain. Input: start/end LULC + years. Output: markov.csv with predicted per-class demands."
+    description = "Predict future land use demand using Markov chain. Output: markov.csv. The result message includes the demand string for CARS (format: 1,demand_c1,demand_c2,...)."
     parameters = {
         "type": "object",
         "properties": {
@@ -20,10 +21,54 @@ class MarkovTool(BaseTool):
     }
 
     def execute(self, params: dict) -> ToolResult:
-        tmp = f"<StartMap>\n{params['start_map']}\n<EndMap>\n{params['end_map']}\n<Start Year>\n{params['start_year']}\n<End Year>\n{params['end_year']}\n<Predict Year>\n{params['predict_year']}\n"
+        tmp = (
+            f"<StartMap>\n{params['start_map']}\n"
+            f"<EndMap>\n{params['end_map']}\n"
+            f"<Start Year>\n{params['start_year']}\n"
+            f"<End Year>\n{params['end_year']}\n"
+            f"<Predict Year>\n{params['predict_year']}\n"
+        )
         write_tmp("PLUS_Markov.tmp", tmp)
         rc, stdout, stderr = run_bat("markov.bat")
         if rc != 0:
             return ToolResult(success=False, error=f"Markov failed (rc={rc}): {stderr}")
+
         output = str(CPP_DIR / "output" / "markov.csv")
-        return ToolResult(success=True, message=f"Markov prediction for {params['predict_year']} complete", output_paths=[output])
+        demand_str = self._extract_demand(output, params["predict_year"])
+
+        msg = f"Markov prediction for {params['predict_year']} complete."
+        if demand_str:
+            msg += f"\nCARS yearly_demands = `{demand_str}`"
+        return ToolResult(success=True, message=msg, output_paths=[output])
+
+    @staticmethod
+    def _extract_demand(csv_path: str, predict_year: int) -> str | None:
+        """Parse markov.csv [Predict amount] section, find the row matching predict_year,
+        and return a CARS-compatible demand string: '1,val1,val2,...'"""
+        if not os.path.exists(csv_path):
+            return None
+        try:
+            with open(csv_path, "r", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                in_predict = False
+                for row in reader:
+                    if not row:
+                        continue
+                    # Detect [Predict amount] section
+                    if row[0].strip().startswith("[Predict"):
+                        in_predict = True
+                        continue
+                    if in_predict and row[0].strip().startswith("["):
+                        break  # reached next section
+                    if in_predict:
+                        try:
+                            year = int(float(row[0]))
+                        except (ValueError, IndexError):
+                            continue
+                        if year == predict_year:
+                            # Format: 1,demand_c1,demand_c2,...
+                            values = [str(int(float(v))) for v in row[1:]]
+                            return "1," + ",".join(values)
+            return None
+        except Exception:
+            return None

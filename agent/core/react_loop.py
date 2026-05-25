@@ -10,6 +10,9 @@ from agent.memory.store import MemoryStore
 
 logger = logging.getLogger(__name__)
 
+# Sentinel for cancellation — shared with callbacks.py
+CANCEL = object()
+
 # Parameters that are hardcoded per CLAUDE.md "任何时候都不做改动"
 # These are never shown to the user and never configurable
 _IMMUTABLE_PARAMS = {
@@ -47,15 +50,17 @@ class ReactLoop:
         self.registry = registry
         self.memory = memory
 
-    async def run(self, user_message: str, history: list[dict]):
-        """Async generator that yields events:
-        {'type':'tool_result', 'result':{...}}       — tool executed
-        {'type':'ask_params', 'tool':..., ...}        — need required params from user
-        {'type':'confirm_params', 'tool':..., ...}    — confirm/modify all params before execution
-        {'type':'text', 'content':...}                — final text response
-        """
+    async def run(self, user_message: str, history: list[dict], context_notes: list[str] | None = None):
+        """Async generator that yields events."""
+        # Build system prompt with pinned context facts
+        system_content = SYSTEM_PROMPT
+        if context_notes:
+            system_content += "\n\n## 会话上下文（已记住的关键信息，优先参考）\n"
+            for i, note in enumerate(context_notes, 1):
+                system_content += f"{i}. {note}\n"
+
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_content},
             *history,
             {"role": "user", "content": user_message},
         ]
@@ -106,33 +111,32 @@ class ReactLoop:
                         answers = await queue.get()
                         tool_args.update(answers)
 
-                    # Step 2: confirm ALL configurable params (including defaults)
-                    # Build a set of all configurable params
-                    all_configurable = {
-                        k for k in props.get("properties", {})
-                        if k not in _IMMUTABLE_PARAMS
-                    }
-                    # Merge defaults that the LLM didn't set
-                    for name, pinfo in props.get("properties", {}).items():
-                        if name in _IMMUTABLE_PARAMS:
-                            continue
-                        if tool_args.get(name) in (None, "", []):
-                            default = pinfo.get("default")
-                            if default is not None:
-                                tool_args[name] = default
+                    # Step 2: confirm params (skip for tools with confirm_before_execute=False)
+                    if getattr(tool, "confirm_before_execute", True):
+                        # Merge defaults that the LLM didn't set
+                        for name, pinfo in props.get("properties", {}).items():
+                            if name in _IMMUTABLE_PARAMS:
+                                continue
+                            if tool_args.get(name) in (None, "", []):
+                                default = pinfo.get("default")
+                                if default is not None:
+                                    tool_args[name] = default
 
-                    confirm_queue: asyncio.Queue = asyncio.Queue()
-                    confirm_text = _build_confirm_text(tool_name, props, tool_args)
-                    yield {
-                        "type": "confirm_params",
-                        "tool": tool_name,
-                        "text": confirm_text,
-                        "params": dict(tool_args),
-                        "queue": confirm_queue,
-                    }
-                    modifications = await confirm_queue.get()
-                    if modifications:
-                        tool_args.update(modifications)
+                        confirm_queue: asyncio.Queue = asyncio.Queue()
+                        confirm_text = _build_confirm_text(tool_name, props, tool_args)
+                        yield {
+                            "type": "confirm_params",
+                            "tool": tool_name,
+                            "text": confirm_text,
+                            "params": dict(tool_args),
+                            "queue": confirm_queue,
+                        }
+                        modifications = await confirm_queue.get()
+                        if isinstance(modifications, dict) and modifications.get("cancel"):
+                            messages.append({"role": "user", "content": modifications["message"]})
+                            continue
+                        if modifications:
+                            tool_args.update(modifications)
 
                     # Step 3: execute
                     logger.info(f"Executing tool: {tool_name} ...")

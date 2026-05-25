@@ -6,6 +6,10 @@ import chainlit as cl
 from chainlit.input_widget import Select, TextInput
 
 from agent.config import LLM_BACKEND, LLM_CONFIG
+from agent.file_utils import (
+    save_uploaded_file, extract_zip_to, scan_uploads, build_context_note,
+    LULC_DIR, DRIVERS_DIR, CONSTRAINTS_DIR, OUTPUTS_DIR, make_output_dir,
+)
 from agent.llm.adapter import create_llm
 from agent.tools.registry import ToolRegistry
 from agent.tools.convert import ConvertTool
@@ -16,6 +20,7 @@ from agent.tools.linear import LinearTool
 from agent.tools.cars import CARSTool
 from agent.tools.validation import ValidationTool
 from agent.tools.diverse import DiverseTool
+from agent.tools.file_tools import ListFilesTool, ReadFileTool, SearchFilesTool
 from agent.memory import MemoryStore
 from agent.core.react_loop import ReactLoop
 from agent.ui.renderers import render_raster, render_csv
@@ -25,7 +30,7 @@ logger = logging.getLogger(__name__)
 _loop: ReactLoop | None = None
 _memory: MemoryStore | None = None
 _registry: ToolRegistry | None = None
-_MAX_HISTORY = 20
+_MAX_HISTORY = 100  # ~50 turns, then older messages are trimmed
 
 
 def _build_loop(backend: str, api_key_env: str, model: str, base_url: str | None = None):
@@ -44,6 +49,9 @@ def _build_loop(backend: str, api_key_env: str, model: str, base_url: str | None
         _registry.register(CARSTool())
         _registry.register(ValidationTool())
         _registry.register(DiverseTool())
+        _registry.register(ListFilesTool())
+        _registry.register(ReadFileTool())
+        _registry.register(SearchFilesTool())
     cfg = {"model": model, "api_key_env": "_PLUS_USER_API_KEY"}
     if base_url:
         cfg["base_url"] = base_url
@@ -58,6 +66,11 @@ async def on_chat_start():
     cfg = LLM_CONFIG.get(backend, LLM_CONFIG["claude"])
     _build_loop(backend, cfg["api_key_env"], cfg["model"], cfg.get("base_url"))
     cl.user_session.set("history", [])
+    cl.user_session.set("context_notes", [])
+
+    # Create output directory for this session and remember it
+    out_dir = make_output_dir()
+    cl.user_session.set("output_dir", out_dir)
 
     # Settings panel: gear icon in the UI
     await cl.ChatSettings([
@@ -76,8 +89,13 @@ async def on_chat_start():
 
     runs = _memory.get_recent_runs(3)
     paths = _memory.get_frequent_paths()
+    scan = scan_uploads()
+    upload_note = build_context_note(scan)
     welcome = "你好！我是 **PLUS Agent**，基于 PLUS 模型的土地利用模拟助手。\n\n"
-    welcome += "右上角齿轮 ⚙ 可切换模型和配置 API Key。\n\n"
+    welcome += "对话栏左侧 ⚙ 可切换模型和配置 API Key。\n"
+    welcome += "📎 直接拖拽或粘贴文件上传数据（.tif 或 .zip）。\n\n"
+    if upload_note:
+        welcome += f"**已上传文件：**\n{upload_note}\n\n"
     if runs:
         welcome += "### 最近运行\n"
         for r in runs:
@@ -123,33 +141,132 @@ def _parse_param_value(raw: str, param_type: str):
     return raw
 
 
-def _parse_modifications(raw: str, props: dict) -> dict:
-    raw = raw.strip().lower()
-    if raw in ("ok", "confirm", "yes", "y", ""):
-        return {}
-    result = {}
-    for part in raw.split(","):
-        part = part.strip()
-        if "=" not in part:
-            continue
-        key, _, val = part.partition("=")
-        key = key.strip()
-        val = val.strip()
-        pinfo = props.get("properties", {}).get(key, {})
-        param_type = pinfo.get("type", "string")
-        try:
-            result[key] = _parse_param_value(val, param_type)
-        except (ValueError, TypeError):
-            logger.warning(f"Failed to parse {key}={val} as {param_type}")
-    return result
+async def _llm_parse_intent(user_text: str, event: dict):
+    """Let the LLM parse user intent: confirm, cancel, or modify parameters."""
+    import json
+    tool_name = event["tool"]
+    params = event.get("params", {})
+    tool = _loop.registry.get(tool_name)
+    props = tool.parameters if tool else {}
+
+    param_lines = []
+    for name, pinfo in props.get("properties", {}).items():
+        cur = params.get(name, "<not set>")
+        ptype = pinfo.get("type", "string")
+        desc = pinfo.get("description", "")[:80]
+        param_lines.append(f"  {name} ({ptype}): current={cur}  — {desc}")
+    param_desc = "\n".join(param_lines)
+
+    prompt = f"""You are a parameter parser. Analyze the user's response to a confirmation prompt.
+
+Tool: "{tool_name}"
+Parameters:
+{param_desc}
+
+User said: "{user_text}"
+
+Return ONLY JSON (no markdown, no explanation):
+- Proceed: {{"action":"confirm"}}
+- Cancel: {{"action":"cancel","reason":"why"}}
+- Modify: {{"action":"modify","changes":{{"param":value}}}}"""
+
+    try:
+        response = await asyncio.to_thread(_loop.llm.chat, [{"role": "user", "content": prompt}], [])
+        content = response.content.strip()
+        if content.startswith("```"):
+            content = content.split("\n", 1)[1].rsplit("\n```", 1)[0]
+        data = json.loads(content)
+        action = data.get("action", "confirm")
+
+        if action == "modify":
+            changes = data.get("changes", {})
+            converted = {}
+            for k, v in changes.items():
+                pinfo = props.get("properties", {}).get(k, {})
+                try:
+                    converted[k] = _parse_param_value(str(v), pinfo.get("type", "string"))
+                except (ValueError, TypeError):
+                    converted[k] = v
+            await cl.Message(content="✅ 已更新: " + ", ".join(f"`{k}={v}`" for k, v in converted.items())).send()
+            return converted
+        elif action == "cancel":
+            await cl.Message(content="⏸ 已取消").send()
+            return {"cancel": True, "message": f"{user_text}（{data.get('reason', '')}）"}
+        else:
+            await cl.Message(content="✅ 按当前参数继续。").send()
+            return {}
+    except Exception as e:
+        logger.warning(f"Intent parse failed: {e}, forwarding to LLM")
+        await cl.Message(content="🤔 已转发给模型处理").send()
+        return {"cancel": True, "message": user_text}
+
+
+async def _handle_uploads(elements: list) -> str:
+    """Save uploaded files to the right uploads/ subdirectory. Returns status message."""
+    tif_files = []
+    zip_files = []
+    other_files = []
+    for el in elements:
+        name = getattr(el, "name", "")
+        if name.lower().endswith(".zip"):
+            zip_files.append(el)
+        elif name.lower().endswith((".tif", ".tiff")):
+            tif_files.append(el)
+        else:
+            other_files.append(el)
+
+    msgs = []
+    # TIF files → uploads/lulc (default) or based on naming hint
+    for f in tif_files:
+        # Detect if it's a driving factor by naming convention
+        subdir = DRIVERS_DIR if any(k in f.name.lower() for k in ["dem", "slope", "dist_", "pre", "tem", "gdp", "pop", "soil"]) else LULC_DIR
+        path = save_uploaded_file(f, subdir)
+        if path:
+            msgs.append(f"✅ `{f.name}` → `{subdir.name}/`")
+
+    # ZIP files → extract to drivers/
+    for f in zip_files:
+        if f.path and os.path.exists(f.path):
+            extracted = extract_zip_to(f.path, DRIVERS_DIR)
+            msgs.append(f"📦 `{f.name}` 解压到 `drivers/`（{len(extracted)} 个文件）")
+
+    # Other files
+    for f in other_files:
+        msgs.append(f"⚠️ `{f.name}` 格式不支持，已跳过")
+
+    if msgs:
+        return "**文件上传结果：**\n" + "\n".join(msgs)
+    return ""
 
 
 @cl.on_message
 async def on_message(message: cl.Message):
     history = cl.user_session.get("history", [])
+    context_notes = cl.user_session.get("context_notes", [])
+
+    # Always inject current uploads/ scan and output dir as context notes
+    scan = scan_uploads()
+    upload_note = build_context_note(scan)
+    out_dir = cl.user_session.get("output_dir", "")
+    context_notes = [n for n in context_notes if not n.startswith("[已上传]") and not n.startswith("[输出目录]")]
+    if upload_note:
+        context_notes.insert(0, f"[已上传] {upload_note}")
+    if out_dir:
+        context_notes.insert(1, f"[输出目录] 所有输出结果请使用此目录: {out_dir}")
+
+    # Handle file uploads: save to uploads/ and note them
+    if message.elements:
+        uploaded = await _handle_uploads(message.elements)
+        if uploaded:
+            await cl.Message(content=uploaded).send()
+            # Refresh scan after upload
+            scan = scan_uploads()
+            note = build_context_note(scan)
+            if note:
+                context_notes.append(f"[上传文件] {note}")
 
     final_text = ""
-    async for event in _loop.run(message.content, history):
+    async for event in _loop.run(message.content, history, context_notes):
         if event["type"] == "ask_params":
             tool_name = event["tool"]
             collected = {}
@@ -179,14 +296,18 @@ async def on_message(message: cl.Message):
             ).send()
             modifications = {}
             if res and res["output"]:
-                tool = _loop.registry.get(event["tool"])
-                props = tool.parameters if tool else {}
-                modifications = _parse_modifications(res["output"], props)
-                if modifications:
-                    msg = "✅ Using: " + ", ".join(f"`{k}={v}`" for k, v in modifications.items())
+                raw_output = res["output"].strip()
+                # Fast path: explicit confirm/cancel
+                raw_lower = raw_output.lower()
+                if raw_lower in ("ok", "confirm", "yes", "y", ""):
+                    await cl.Message(content="✅ 按当前参数继续。").send()
+                elif raw_lower in ("停", "取消", "cancel", "stop"):
+                    await cl.Message(content="⏸ 已取消").send()
+                    modifications = {"cancel": True, "message": raw_output}
                 else:
-                    msg = "✅ Proceeding with current parameters."
-                await cl.Message(content=msg).send()
+                    # Use LLM to parse the user's intent
+                    await cl.Message(content="🤔 ...").send()
+                    modifications = await _llm_parse_intent(raw_output, event)
             await event["queue"].put(modifications)
 
         elif event["type"] == "tool_result":
@@ -226,9 +347,56 @@ async def on_message(message: cl.Message):
         history = history[-_MAX_HISTORY:]
     cl.user_session.set("history", history)
 
+    # Extract key facts from this turn to persist in context_notes
+    _extract_context_facts(message.content, final_text, context_notes)
+    cl.user_session.set("context_notes", context_notes)
+
     _maybe_save_paths(message.content)
     if final_text:
         _maybe_save_paths(final_text)
+
+
+def _extract_context_facts(user_msg: str, assistant_msg: str, notes: list[str]):
+    """Extract key facts (paths, parameters, decisions) and pin them to context_notes."""
+    import re
+    # Extract all file paths from both user and assistant messages
+    all_text = f"{user_msg}\n{assistant_msg}"
+    drives = r"[A-Za-z]:"
+    path_pattern = rf"({drives}[\\/][^\s,;]+\.(?:tif|tiff|img|dat|shp|csv))"
+    found_paths = set()
+    for match in re.findall(path_pattern, all_text, re.IGNORECASE):
+        path = match if isinstance(match, str) else match[0]
+        found_paths.add(path)
+
+    # Extract key decisions: tool names, parameter values
+    for path in found_paths:
+        basename = os.path.basename(path)
+        # Try to classify the path
+        if "landuse" in basename.lower() or "expansion" in basename.lower():
+            note = f"用地扩张结果: {path}"
+        elif "potential" in basename.lower() or "band" in basename.lower():
+            note = f"LEAS 概率图: {path}"
+        elif "simulation" in basename.lower():
+            note = f"CARS 模拟结果: {path}"
+        elif "drivingfactor" in basename.lower() or "driver" in basename.lower():
+            note = f"驱动因子文件夹: {path}"
+        elif "refy" in basename.lower() or "lulc" in basename.lower():
+            note = f"土地利用数据: {path}"
+        elif "markov" in basename.lower():
+            note = f"Markov 预测结果: {path}"
+        elif "kappa" in basename.lower() or "fom" in basename.lower():
+            note = f"精度验证结果: {path}"
+        elif "contribution" in basename.lower():
+            note = f"驱动因子贡献度: {path}"
+        else:
+            note = f"文件路径: {path}"
+
+        if note not in notes:
+            notes.append(note)
+
+    # Keep only last 20 facts to avoid bloat
+    while len(notes) > 20:
+        notes.pop(0)
 
 
 def _maybe_save_paths(text: str):
