@@ -1,9 +1,9 @@
 <Input LULC>
-C:/Users/10421/Desktop/testdata/t4/expansion_output_landuse_1to2.tif
+C:\Users\10421\Desktop\PLUS_Agent\workspaces\1042147574_at_qq_com\outputs\expansion_output_landuse_1to2.tif
 <Input Featrue folder>
-C:/Users/10421/Desktop/testdata/drivingfactors
+C:\Users\10421\Desktop\PLUS_Agent\workspaces\1042147574_at_qq_com\uploads\drivers
 <Output probability>
-C:/Users/10421/Desktop/testdata/t4/potential.tif
+C:\Users\10421\Desktop\PLUS_Agent\workspaces\1042147574_at_qq_com\outputs\probability_output.tif
 <Is net exit?>
 0
 <Input sampling rate>

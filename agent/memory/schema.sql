@@ -36,7 +36,9 @@ CREATE TABLE IF NOT EXISTS user_preferences (
 CREATE TABLE IF NOT EXISTS conversation_summaries (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL,
+    title TEXT,
     summary TEXT,
+    messages_json TEXT,
     key_decisions_json TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

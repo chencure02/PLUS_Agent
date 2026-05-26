@@ -1,6 +1,7 @@
 import os
 import asyncio
 import logging
+from pathlib import Path
 
 import chainlit as cl
 from chainlit.input_widget import Select, TextInput
@@ -21,6 +22,7 @@ from agent.tools.cars import CARSTool
 from agent.tools.validation import ValidationTool
 from agent.tools.diverse import DiverseTool
 from agent.tools.file_tools import ListFilesTool, ReadFileTool, SearchFilesTool
+from agent.tools.neighborhood_weight import NeighborhoodWeightTool
 from agent.memory import MemoryStore
 from agent.core.react_loop import ReactLoop
 from agent.ui.renderers import render_raster, render_csv
@@ -30,11 +32,10 @@ logger = logging.getLogger(__name__)
 _loop: ReactLoop | None = None
 _memory: MemoryStore | None = None
 _registry: ToolRegistry | None = None
-_MAX_HISTORY = 100  # ~50 turns, then older messages are trimmed
+_MAX_HISTORY = 100
 
 
 def _build_loop(backend: str, api_key_env: str, model: str, base_url: str | None = None):
-    """Build a ReactLoop with the given LLM config."""
     global _loop, _memory, _registry
     if _memory is None:
         db_path = os.environ.get("PLUS_MEMORY_DB", "data/memory.db")
@@ -52,12 +53,30 @@ def _build_loop(backend: str, api_key_env: str, model: str, base_url: str | None
         _registry.register(ListFilesTool())
         _registry.register(ReadFileTool())
         _registry.register(SearchFilesTool())
+        _registry.register(NeighborhoodWeightTool())
     cfg = {"model": model, "api_key_env": "_PLUS_USER_API_KEY"}
     if base_url:
         cfg["base_url"] = base_url
     os.environ.setdefault("_PLUS_USER_API_KEY", os.environ.get(api_key_env, ""))
     llm = create_llm(backend, cfg)
     _loop = ReactLoop(llm, _registry, _memory)
+
+
+# ── Lifecycle ────────────────────────────────────────────────
+
+def _init_session():
+    """Set up per-user session state. Called on new chat or resume."""
+    user = cl.user_session.get("user")
+    user_id = user.identifier if user else "default"
+    safe_id = user_id.replace("@", "_at_").replace(".", "_")
+
+    from agent.main import _user_workspace
+    ws = _user_workspace(user_id)
+    cl.user_session.set("ws_uploads_lulc", ws["uploads_lulc"])
+    cl.user_session.set("ws_uploads_drivers", ws["uploads_drivers"])
+    cl.user_session.set("ws_uploads_constraints", ws["uploads_constraints"])
+    cl.user_session.set("ws_outputs", ws["outputs"])
+    cl.user_session.set("output_dir", ws["outputs"])
 
 
 @cl.on_chat_start
@@ -67,54 +86,54 @@ async def on_chat_start():
     _build_loop(backend, cfg["api_key_env"], cfg["model"], cfg.get("base_url"))
     cl.user_session.set("history", [])
     cl.user_session.set("context_notes", [])
+    cl.user_session.set("session_files", set())
+    _init_session()
 
-    # Create output directory for this session and remember it
-    out_dir = make_output_dir()
-    cl.user_session.set("output_dir", out_dir)
-
-    # Settings panel: gear icon in the UI
     await cl.ChatSettings([
-        Select(
-            id="backend",
-            label="模型后端",
-            values=["claude", "openai", "deepseek", "qwen"],
-            initial_value=backend,
-        ),
-        TextInput(
-            id="api_key",
-            label="API Key（留空则使用 .env 配置）",
-            initial="",
-        ),
+        Select(id="backend", label="模型后端",
+               values=["claude", "openai", "deepseek", "qwen"], initial_value=backend),
+        TextInput(id="api_key", label="API Key（留空则使用 .env 配置）", initial=""),
     ]).send()
 
     runs = _memory.get_recent_runs(3)
-    paths = _memory.get_frequent_paths()
-    scan = scan_uploads()
-    upload_note = build_context_note(scan)
     welcome = "你好！我是 **PLUS Agent**，基于 PLUS 模型的土地利用模拟助手。\n\n"
     welcome += "对话栏左侧 ⚙ 可切换模型和配置 API Key。\n"
-    welcome += "📎 直接拖拽或粘贴文件上传数据（.tif 或 .zip）。\n\n"
-    if upload_note:
-        welcome += f"**已上传文件：**\n{upload_note}\n\n"
+    welcome += "📎 直接拖拽或粘贴文件上传数据（.tif 或 .zip）。\n"
+    welcome += "左侧边栏可以查看和继续历史对话。\n\n"
     if runs:
         welcome += "### 最近运行\n"
         for r in runs:
             icon = "✅" if r["status"] == "success" else "❌"
             welcome += f"- {icon} **{r['name']}** ({r['created_at'][:10]})\n"
-    if paths:
-        welcome += f"\n已保存的路径：{', '.join(paths[:3])}\n"
     await cl.Message(content=welcome).send()
+
+
+@cl.on_chat_resume
+async def on_chat_resume(thread):
+    """Called when user clicks a past thread in the sidebar."""
+    backend = LLM_BACKEND
+    cfg = LLM_CONFIG.get(backend, LLM_CONFIG["claude"])
+    _build_loop(backend, cfg["api_key_env"], cfg["model"], cfg.get("base_url"))
+    cl.user_session.set("history", [])
+    cl.user_session.set("context_notes", [])
+    cl.user_session.set("session_files", set())
+    _init_session()
+    # Re-send ChatSettings (required for UI context on resume)
+    await cl.ChatSettings([
+        Select(id="backend", label="模型后端",
+               values=["claude", "openai", "deepseek", "qwen"], initial_value=backend),
+        TextInput(id="api_key", label="API Key（留空则使用 .env 配置）", initial=""),
+    ]).send()
+    # Do NOT send messages here — Chainlit auto-restores thread messages after hook returns
 
 
 @cl.on_settings_update
 async def on_settings_update(settings):
-    # Chainlit 2.x passes settings as a single dict
     backend = (settings.get("backend") if isinstance(settings, dict) else settings) or LLM_BACKEND
     api_key = (settings.get("api_key", "") if isinstance(settings, dict) else "").strip()
     if backend not in LLM_CONFIG:
         await cl.Message(content=f"❌ 未知后端：`{backend}`").send()
         return
-
     cfg = LLM_CONFIG[backend]
     model = cfg["model"]
     base_url = cfg.get("base_url")
@@ -122,11 +141,12 @@ async def on_settings_update(settings):
         os.environ["_PLUS_USER_API_KEY"] = api_key
     else:
         os.environ["_PLUS_USER_API_KEY"] = os.environ.get(cfg["api_key_env"], "")
-
     _build_loop(backend, cfg["api_key_env"], model, base_url)
     cl.user_session.set("history", [])
     await cl.Message(content=f"✅ 已切换到 `{backend}`（`{model}`）").send()
 
+
+# ── Helpers ─────────────────────────────────────────────────
 
 def _parse_param_value(raw: str, param_type: str):
     raw = raw.strip()
@@ -155,13 +175,12 @@ async def _llm_parse_intent(user_text: str, event: dict):
         ptype = pinfo.get("type", "string")
         desc = pinfo.get("description", "")[:80]
         param_lines.append(f"  {name} ({ptype}): current={cur}  — {desc}")
-    param_desc = "\n".join(param_lines)
 
     prompt = f"""You are a parameter parser. Analyze the user's response to a confirmation prompt.
 
 Tool: "{tool_name}"
 Parameters:
-{param_desc}
+{chr(10).join(param_lines)}
 
 User said: "{user_text}"
 
@@ -201,11 +220,13 @@ Return ONLY JSON (no markdown, no explanation):
         return {"cancel": True, "message": user_text}
 
 
-async def _handle_uploads(elements: list) -> str:
-    """Save uploaded files to the right uploads/ subdirectory. Returns status message."""
-    tif_files = []
-    zip_files = []
-    other_files = []
+async def _handle_uploads(elements: list) -> tuple[str, set]:
+    """Save uploaded files to per-user workspace. Returns (status_message, set_of_paths)."""
+    # Use per-user workspace dirs instead of global constants
+    lulc_dir = Path(cl.user_session.get("ws_uploads_lulc", str(LULC_DIR)))
+    drivers_dir = Path(cl.user_session.get("ws_uploads_drivers", str(DRIVERS_DIR)))
+
+    tif_files, zip_files, other_files = [], [], []
     for el in elements:
         name = getattr(el, "name", "")
         if name.lower().endswith(".zip"):
@@ -216,57 +237,74 @@ async def _handle_uploads(elements: list) -> str:
             other_files.append(el)
 
     msgs = []
-    # TIF files → uploads/lulc (default) or based on naming hint
+    saved = set()
     for f in tif_files:
-        # Detect if it's a driving factor by naming convention
-        subdir = DRIVERS_DIR if any(k in f.name.lower() for k in ["dem", "slope", "dist_", "pre", "tem", "gdp", "pop", "soil"]) else LULC_DIR
+        subdir = drivers_dir if any(k in f.name.lower() for k in ["dem", "slope", "dist_", "pre", "tem", "gdp", "pop", "soil"]) else lulc_dir
+        subdir.mkdir(parents=True, exist_ok=True)
         path = save_uploaded_file(f, subdir)
         if path:
-            msgs.append(f"✅ `{f.name}` → `{subdir.name}/`")
-
-    # ZIP files → extract to drivers/
+            saved.add(path)
+            msgs.append(f"✅ `{f.name}` → `{subdir}/`")
     for f in zip_files:
         if f.path and os.path.exists(f.path):
-            extracted = extract_zip_to(f.path, DRIVERS_DIR)
-            msgs.append(f"📦 `{f.name}` 解压到 `drivers/`（{len(extracted)} 个文件）")
-
-    # Other files
+            drivers_dir.mkdir(parents=True, exist_ok=True)
+            extracted = extract_zip_to(f.path, drivers_dir)
+            saved.update(extracted)
+            msgs.append(f"📦 `{f.name}` 解压到 `{drivers_dir}`（{len(extracted)} 个文件）")
     for f in other_files:
         msgs.append(f"⚠️ `{f.name}` 格式不支持，已跳过")
 
     if msgs:
-        return "**文件上传结果：**\n" + "\n".join(msgs)
-    return ""
+        return "**文件上传结果：**\n" + "\n".join(msgs), saved
+    return "", saved
+    return "", saved
 
+
+# ── Message handler ─────────────────────────────────────────
 
 @cl.on_message
 async def on_message(message: cl.Message):
     history = cl.user_session.get("history", [])
     context_notes = cl.user_session.get("context_notes", [])
-
-    # Always inject current uploads/ scan and output dir as context notes
-    scan = scan_uploads()
-    upload_note = build_context_note(scan)
+    session_files: set = cl.user_session.get("session_files", set())
     out_dir = cl.user_session.get("output_dir", "")
-    context_notes = [n for n in context_notes if not n.startswith("[已上传]") and not n.startswith("[输出目录]")]
-    if upload_note:
-        context_notes.insert(0, f"[已上传] {upload_note}")
+
+    # Handle file uploads FIRST, before building context
+    user_msg_text = message.content
+    if message.elements:
+        upload_msg, new_paths = await _handle_uploads(message.elements)
+        session_files.update(new_paths)
+        cl.user_session.set("session_files", session_files)
+        if upload_msg:
+            await cl.Message(content=upload_msg).send()
+        # Inject upload info into the user message so the LLM sees it
+        if new_paths:
+            names = ", ".join(os.path.basename(p) for p in new_paths)
+            user_msg_text = f"(用户刚刚上传了文件: {names})\n{user_msg_text}"
+
+    # Build context: only show files from THIS session
+    context_notes = [n for n in context_notes
+                     if not n.startswith("[已上传]") and not n.startswith("[输出目录]")]
+    if session_files:
+        # Build a custom note from session files only
+        lulc = [p for p in session_files if "/lulc/" in p.replace("\\", "/")]
+        drivers = sorted(set(os.path.dirname(p) for p in session_files
+                            if "/drivers/" in p.replace("\\", "/")))
+        constraints = [p for p in session_files if "/constraints/" in p.replace("\\", "/")]
+        parts = []
+        if lulc:
+            parts.append(f"LULC 数据 ({len(lulc)} 张): " + ", ".join(lulc))
+        if drivers:
+            parts.append("驱动因子文件夹: " + ", ".join(drivers))
+        if constraints:
+            parts.append("约束图: " + ", ".join(constraints))
+        if parts:
+            context_notes.insert(0, f"[已上传] {' | '.join(parts)}")
     if out_dir:
         context_notes.insert(1, f"[输出目录] 所有输出结果请使用此目录: {out_dir}")
 
-    # Handle file uploads: save to uploads/ and note them
-    if message.elements:
-        uploaded = await _handle_uploads(message.elements)
-        if uploaded:
-            await cl.Message(content=uploaded).send()
-            # Refresh scan after upload
-            scan = scan_uploads()
-            note = build_context_note(scan)
-            if note:
-                context_notes.append(f"[上传文件] {note}")
-
     final_text = ""
-    async for event in _loop.run(message.content, history, context_notes):
+    async for event in _loop.run(user_msg_text, history, context_notes):
         if event["type"] == "ask_params":
             tool_name = event["tool"]
             collected = {}
@@ -290,25 +328,24 @@ async def on_message(message: cl.Message):
             await event["queue"].put(collected)
 
         elif event["type"] == "confirm_params":
-            res = await cl.AskUserMessage(
-                content=event["text"],
-                timeout=600,
-            ).send()
-            modifications = {}
-            if res and res["output"]:
-                raw_output = res["output"].strip()
-                # Fast path: explicit confirm/cancel
-                raw_lower = raw_output.lower()
-                if raw_lower in ("ok", "confirm", "yes", "y", ""):
-                    await cl.Message(content="✅ 按当前参数继续。").send()
-                elif raw_lower in ("停", "取消", "cancel", "stop"):
-                    await cl.Message(content="⏸ 已取消").send()
-                    modifications = {"cancel": True, "message": raw_output}
-                else:
-                    # Use LLM to parse the user's intent
-                    await cl.Message(content="🤔 ...").send()
-                    modifications = await _llm_parse_intent(raw_output, event)
-            await event["queue"].put(modifications)
+            res = await cl.AskUserMessage(content=event["text"], timeout=600).send()
+            # Default: cancel if no response (timeout / empty input)
+            if not res or not res.get("output") or not res["output"].strip():
+                await cl.Message(content="⏸ 超时或空输入，已取消。请重新给出指令。").send()
+                await event["queue"].put({"cancel": True, "message": "用户未响应确认提示"})
+
+            raw_output = res["output"].strip()
+            raw_lower = raw_output.lower()
+            if raw_lower in ("ok", "confirm", "yes", "y"):
+                await cl.Message(content="✅ 按当前参数继续。").send()
+                await event["queue"].put({})
+            elif raw_lower in ("停", "取消", "cancel", "stop"):
+                await cl.Message(content="⏸ 已取消").send()
+                await event["queue"].put({"cancel": True, "message": raw_output})
+            else:
+                await cl.Message(content="🤔 ...").send()
+                modifications = await _llm_parse_intent(raw_output, event)
+                await event["queue"].put(modifications)
 
         elif event["type"] == "tool_result":
             tr = event["result"]
@@ -338,16 +375,16 @@ async def on_message(message: cl.Message):
         elif event["type"] == "text":
             final_text = event["content"]
 
+    # Update history
     history.append({"role": "user", "content": message.content})
     if final_text:
         history.append({"role": "assistant", "content": final_text})
         await cl.Message(content=final_text).send()
-
     if len(history) > _MAX_HISTORY:
         history = history[-_MAX_HISTORY:]
     cl.user_session.set("history", history)
 
-    # Extract key facts from this turn to persist in context_notes
+    # Persist context facts
     _extract_context_facts(message.content, final_text, context_notes)
     cl.user_session.set("context_notes", context_notes)
 
@@ -357,9 +394,7 @@ async def on_message(message: cl.Message):
 
 
 def _extract_context_facts(user_msg: str, assistant_msg: str, notes: list[str]):
-    """Extract key facts (paths, parameters, decisions) and pin them to context_notes."""
     import re
-    # Extract all file paths from both user and assistant messages
     all_text = f"{user_msg}\n{assistant_msg}"
     drives = r"[A-Za-z]:"
     path_pattern = rf"({drives}[\\/][^\s,;]+\.(?:tif|tiff|img|dat|shp|csv))"
@@ -367,34 +402,28 @@ def _extract_context_facts(user_msg: str, assistant_msg: str, notes: list[str]):
     for match in re.findall(path_pattern, all_text, re.IGNORECASE):
         path = match if isinstance(match, str) else match[0]
         found_paths.add(path)
-
-    # Extract key decisions: tool names, parameter values
     for path in found_paths:
-        basename = os.path.basename(path)
-        # Try to classify the path
-        if "landuse" in basename.lower() or "expansion" in basename.lower():
+        basename = os.path.basename(path).lower()
+        if "landuse" in basename or "expansion" in basename:
             note = f"用地扩张结果: {path}"
-        elif "potential" in basename.lower() or "band" in basename.lower():
+        elif "potential" in basename or "band" in basename:
             note = f"LEAS 概率图: {path}"
-        elif "simulation" in basename.lower():
+        elif "simulation" in basename:
             note = f"CARS 模拟结果: {path}"
-        elif "drivingfactor" in basename.lower() or "driver" in basename.lower():
+        elif "drivingfactor" in basename or "driver" in basename:
             note = f"驱动因子文件夹: {path}"
-        elif "refy" in basename.lower() or "lulc" in basename.lower():
+        elif "refy" in basename or "lulc" in basename:
             note = f"土地利用数据: {path}"
-        elif "markov" in basename.lower():
+        elif "markov" in basename:
             note = f"Markov 预测结果: {path}"
-        elif "kappa" in basename.lower() or "fom" in basename.lower():
+        elif "kappa" in basename or "fom" in basename:
             note = f"精度验证结果: {path}"
-        elif "contribution" in basename.lower():
+        elif "contribution" in basename:
             note = f"驱动因子贡献度: {path}"
         else:
             note = f"文件路径: {path}"
-
         if note not in notes:
             notes.append(note)
-
-    # Keep only last 20 facts to avoid bloat
     while len(notes) > 20:
         notes.pop(0)
 

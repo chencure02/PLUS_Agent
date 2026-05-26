@@ -101,17 +101,40 @@ class MemoryStore:
             ).fetchall()
             return [r[0] for r in rows]
 
-    def save_summary(self, session_id: str, summary: str, decisions: list[dict]):
+    def save_summary(self, session_id: str, title: str = "", summary: str = "",
+                     messages: list[dict] | None = None, decisions: list[dict] | None = None):
         with self._get_conn() as conn:
             conn.execute(
-                "INSERT INTO conversation_summaries (session_id, summary, key_decisions_json) VALUES (?,?,?)",
-                (session_id, summary, json.dumps(decisions))
+                "INSERT OR REPLACE INTO conversation_summaries "
+                "(session_id, title, summary, messages_json, key_decisions_json) VALUES (?,?,?,?,?)",
+                (session_id, title, summary, json.dumps(messages or []), json.dumps(decisions or []))
             )
 
-    def get_recent_summaries(self, limit: int = 3) -> list[dict]:
+    def update_messages(self, session_id: str, messages: list[dict]):
+        """Update messages for an existing session."""
+        with self._get_conn() as conn:
+            conn.execute(
+                "UPDATE conversation_summaries SET messages_json=? WHERE session_id=?",
+                (json.dumps(messages), session_id)
+            )
+
+    def get_summary(self, session_id: str) -> dict | None:
+        with self._get_conn() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM conversation_summaries WHERE session_id=?", (session_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_recent_summaries(self, limit: int = 10) -> list[dict]:
         with self._get_conn() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
-                "SELECT * FROM conversation_summaries ORDER BY created_at DESC LIMIT ?", (limit,)
+                "SELECT id, session_id, title, summary, created_at FROM conversation_summaries "
+                "ORDER BY created_at DESC LIMIT ?", (limit,)
             ).fetchall()
             return [dict(r) for r in rows]
+
+    def delete_conversation(self, session_id: str):
+        with self._get_conn() as conn:
+            conn.execute("DELETE FROM conversation_summaries WHERE session_id=?", (session_id,))
