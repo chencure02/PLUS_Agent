@@ -25,7 +25,7 @@ LLM_CONFIG = {
         "api_key_env": "OPENAI_API_KEY",
     },
     "deepseek": {
-        "model": "deepseek-chat",
+        "model": "deepseek-v4-flash",
         "api_key_env": "DEEPSEEK_API_KEY",
         "base_url": "https://api.deepseek.com/v1",
     },
