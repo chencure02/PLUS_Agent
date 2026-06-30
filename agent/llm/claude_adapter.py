@@ -6,13 +6,6 @@ from .adapter import BaseLLM, LLMResponse, LLMError
 
 class ClaudeAdapter(BaseLLM):
     def __init__(self, config: dict):
-        # Validate required config keys
-        api_key_env = config.get("api_key_env")
-        if not api_key_env:
-            raise ValueError(
-                "Missing required config key 'api_key_env'. "
-                "Set the environment variable name that holds your API key."
-            )
         self.model = config.get("model")
         if not self.model:
             raise ValueError(
@@ -20,9 +13,12 @@ class ClaudeAdapter(BaseLLM):
                 "Set the model name (e.g. 'claude-sonnet-4-20250514')."
             )
 
-        api_key = os.getenv(api_key_env, "")
+        # Prefer direct api_key, fall back to env var
+        api_key = config.get("api_key") or os.getenv(config.get("api_key_env", ""), "")
         if not api_key:
-            raise ValueError(f"Environment variable '{api_key_env}' is not set or is empty.")
+            raise ValueError(
+                "No API key provided. Set it via the settings panel or environment variable."
+            )
         self.client = Anthropic(api_key=api_key)
         self.max_tokens = int(config.get("max_tokens", 4096))
 

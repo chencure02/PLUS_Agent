@@ -1,6 +1,7 @@
 # agent/tools/leas.py
 import glob as glob_mod
 import os
+import shutil
 from agent.tools.base import BaseTool, ToolResult
 from agent.tools import write_tmp, run_bat
 from agent.config import PLUS_BACKEND
@@ -42,25 +43,32 @@ class LEASTool(BaseTool):
             return ToolResult(success=False, error=f"LEAS failed (rc={rc}): {stderr}")
 
         base = params["output_probability"]
-        dir_name = os.path.dirname(base) or "."
-        dir_name = os.path.abspath(dir_name)
+        output_dir = os.path.dirname(os.path.abspath(base))
         base_name = os.path.splitext(os.path.basename(base))[0]
         outputs = []
 
-        # Accuracy and normalization records
-        for f in [str(PLUS_BACKEND / "accuracy_record_rf.txt"), str(PLUS_BACKEND / "imageminmax.txt")]:
-            if os.path.exists(f):
-                outputs.append(f)
+        # Move PLUS_BACKEND-generated files to user's output directory
+        for filename in ["accuracy_record_rf.txt", "imageminmax.txt"]:
+            src = str(PLUS_BACKEND / filename)
+            if os.path.exists(src):
+                dst = os.path.join(output_dir, filename)
+                if os.path.exists(dst):
+                    os.remove(dst)
+                shutil.move(src, dst)
+                outputs.append(dst)
 
-        # Probability bands
-        pattern = os.path.join(dir_name, f"{base_name}_band_*.tif")
+        # Contribution CSVs (one per land use type)
+        for src in sorted(glob_mod.glob(str(PLUS_BACKEND / "Contribution*.csv"))):
+            dst = os.path.join(output_dir, os.path.basename(src))
+            if os.path.exists(dst):
+                os.remove(dst)
+            shutil.move(src, dst)
+            outputs.append(dst)
+
+        # Probability bands (generated directly in output_dir by PLUS.exe)
+        pattern = os.path.join(output_dir, f"{base_name}_band_*.tif")
         bands = sorted(glob_mod.glob(pattern))
         outputs.extend(bands)
-
-        # Driving factor contribution CSVs (one per land use type)
-        for f in sorted(glob_mod.glob(str(PLUS_BACKEND / "Contribution*.csv"))):
-            if os.path.exists(f):
-                outputs.append(f)
 
         band_count = len(bands)
         csv_count = len([o for o in outputs if "Contribution" in o])

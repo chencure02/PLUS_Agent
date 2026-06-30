@@ -95,6 +95,14 @@ with _sync_engine.connect() as _conn:
             workspace TEXT NOT NULL
         )
     """))
+    _conn.execute(sa.text("""
+        CREATE TABLE IF NOT EXISTS user_api_keys (
+            identifier TEXT NOT NULL,
+            backend TEXT NOT NULL,
+            api_key TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (identifier, backend)
+        )
+    """))
     _conn.commit()
 _sync_engine.dispose()
 

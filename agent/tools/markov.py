@@ -1,5 +1,6 @@
 import csv
 import os
+import shutil
 from agent.tools.base import BaseTool, ToolResult
 from agent.tools import write_tmp, run_bat
 from agent.config import CPP_DIR
@@ -7,7 +8,7 @@ from agent.config import CPP_DIR
 
 class MarkovTool(BaseTool):
     name = "markov"
-    description = "Predict future land use demand using Markov chain. Output: markov.csv. The result message includes the demand string for CARS (format: 1,demand_c1,demand_c2,...)."
+    description = "Predict future land use demand using Markov chain. Output: markov.csv (moved to output dir). The result message includes the demand string for CARS (format: 1,demand_c1,demand_c2,...)."
     parameters = {
         "type": "object",
         "properties": {
@@ -16,8 +17,9 @@ class MarkovTool(BaseTool):
             "start_year": {"type": "integer", "description": "Start year (e.g. 2003)"},
             "end_year": {"type": "integer", "description": "End year (e.g. 2013)"},
             "predict_year": {"type": "integer", "description": "Target prediction year (e.g. 2033)"},
+            "output_dir": {"type": "string", "description": "Output directory for markov.csv (use the path from [输出目录])"},
         },
-        "required": ["start_map", "end_map", "start_year", "end_year", "predict_year"]
+        "required": ["start_map", "end_map", "start_year", "end_year", "predict_year", "output_dir"]
     }
 
     def execute(self, params: dict) -> ToolResult:
@@ -33,13 +35,23 @@ class MarkovTool(BaseTool):
         if rc != 0:
             return ToolResult(success=False, error=f"Markov failed (rc={rc}): {stderr}")
 
-        output = str(CPP_DIR / "output" / "markov.csv")
-        demand_str = self._extract_demand(output, params["predict_year"])
+        src = str(CPP_DIR / "output" / "markov.csv")
+        if not os.path.exists(src):
+            return ToolResult(success=False, error=f"Markov output not found at {src}")
+
+        output_dir = os.path.abspath(params["output_dir"])
+        os.makedirs(output_dir, exist_ok=True)
+        dst = os.path.join(output_dir, "markov.csv")
+        if os.path.exists(dst):
+            os.remove(dst)
+        shutil.move(src, dst)
+
+        demand_str = self._extract_demand(dst, params["predict_year"])
 
         msg = f"Markov prediction for {params['predict_year']} complete."
         if demand_str:
             msg += f"\nCARS yearly_demands = `{demand_str}`"
-        return ToolResult(success=True, message=msg, output_paths=[output])
+        return ToolResult(success=True, message=msg, output_paths=[dst])
 
     @staticmethod
     def _extract_demand(csv_path: str, predict_year: int) -> str | None:

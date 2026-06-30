@@ -1,6 +1,8 @@
 import os
 import asyncio
+import json
 import logging
+import uuid
 from pathlib import Path
 
 import chainlit as cl
@@ -35,7 +37,7 @@ _registry: ToolRegistry | None = None
 _MAX_HISTORY = 100
 
 
-def _build_loop(backend: str, api_key_env: str, model: str, base_url: str | None = None):
+def _build_loop(backend: str, model: str, api_key: str, base_url: str | None = None):
     global _loop, _memory, _registry
     if _memory is None:
         db_path = os.environ.get("PLUS_MEMORY_DB", "data/memory.db")
@@ -54,12 +56,73 @@ def _build_loop(backend: str, api_key_env: str, model: str, base_url: str | None
         _registry.register(ReadFileTool())
         _registry.register(SearchFilesTool())
         _registry.register(NeighborhoodWeightTool())
-    cfg = {"model": model, "api_key_env": "_PLUS_USER_API_KEY"}
+    cfg = {
+        "model": model,
+        "api_key": api_key,
+        "api_key_env": LLM_CONFIG.get(backend, {}).get("api_key_env", ""),
+    }
     if base_url:
         cfg["base_url"] = base_url
-    os.environ.setdefault("_PLUS_USER_API_KEY", os.environ.get(api_key_env, ""))
-    llm = create_llm(backend, cfg)
-    _loop = ReactLoop(llm, _registry, _memory)
+    if api_key:
+        llm = create_llm(backend, cfg)
+        _loop = ReactLoop(llm, _registry, _memory)
+    else:
+        _loop = None  # Will be created when user configures a key
+
+
+# ── User API key persistence ─────────────────────────────────
+
+def _get_chainlit_db():
+    """Open a sync SQLite connection to chainlit.db."""
+    import sqlite3
+    from pathlib import Path
+    db_path = Path(__file__).resolve().parent.parent.parent / ".chainlit" / "chainlit.db"
+    return sqlite3.connect(str(db_path))
+
+
+def _load_user_settings(identifier: str) -> dict:
+    """Load saved backend and API keys for a user. Returns {backend: api_key} and active_backend."""
+    conn = _get_chainlit_db()
+    try:
+        rows = conn.execute(
+            "SELECT backend, api_key FROM user_api_keys WHERE identifier = ?",
+            (identifier,)
+        ).fetchall()
+        api_keys = {row[0]: row[1] for row in rows if row[1]}
+        # Active backend stored in memory's user_preferences
+        active = _memory.get_preference(f"backend:{identifier}") if _memory else None
+        return {"api_keys": api_keys, "active_backend": active}
+    finally:
+        conn.close()
+
+
+def _save_user_api_key(identifier: str, backend: str, api_key: str):
+    """Persist a user's API key for a given backend."""
+    conn = _get_chainlit_db()
+    try:
+        conn.execute(
+            "INSERT INTO user_api_keys (identifier, backend, api_key) VALUES (?, ?, ?) "
+            "ON CONFLICT(identifier, backend) DO UPDATE SET api_key = excluded.api_key",
+            (identifier, backend, api_key)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _save_user_backend(identifier: str, backend: str):
+    """Persist the user's preferred backend selection."""
+    if _memory:
+        _memory.set_preference(f"backend:{identifier}", backend)
+
+
+def _get_effective_api_key() -> str:
+    """Return the API key for the current user and backend, or '' if not set."""
+    user = cl.user_session.get("user")
+    identifier = user.identifier if user else "default"
+    backend = cl.user_session.get("active_backend", LLM_BACKEND)
+    settings = _load_user_settings(identifier)
+    return settings["api_keys"].get(backend, "")
 
 
 # ── Lifecycle ────────────────────────────────────────────────
@@ -81,48 +144,69 @@ def _init_session():
 
 @cl.on_chat_start
 async def on_chat_start():
-    backend = LLM_BACKEND
+    # Load saved settings for the current user
+    user = cl.user_session.get("user")
+    identifier = user.identifier if user else "default"
+    settings = _load_user_settings(identifier)
+
+    backend = settings.get("active_backend") or LLM_BACKEND
     cfg = LLM_CONFIG.get(backend, LLM_CONFIG["claude"])
-    _build_loop(backend, cfg["api_key_env"], cfg["model"], cfg.get("base_url"))
+    api_key = settings["api_keys"].get(backend, "")
+    cl.user_session.set("active_backend", backend)
+
+    _build_loop(backend, cfg["model"], api_key, cfg.get("base_url"))
     cl.user_session.set("history", [])
     cl.user_session.set("context_notes", [])
     cl.user_session.set("session_files", set())
+    cl.user_session.set("memory_session_id", str(uuid.uuid4()))
     _init_session()
 
+    masked_key = api_key[:6] + "****" + api_key[-4:] if len(api_key) > 10 else api_key
     await cl.ChatSettings([
         Select(id="backend", label="模型后端",
                values=["claude", "openai", "deepseek", "qwen"], initial_value=backend),
-        TextInput(id="api_key", label="API Key（留空则使用 .env 配置）", initial=""),
+        TextInput(id="api_key", label="API Key", initial=masked_key, placeholder="sk-..."),
     ]).send()
 
-    runs = _memory.get_recent_runs(3)
     welcome = "你好！我是 **PLUS Agent**，基于 PLUS 模型的土地利用模拟助手。\n\n"
     welcome += "对话栏左侧 ⚙ 可切换模型和配置 API Key。\n"
     welcome += "📎 直接拖拽或粘贴文件上传数据（.tif 或 .zip）。\n"
     welcome += "左侧边栏可以查看和继续历史对话。\n\n"
-    if runs:
-        welcome += "### 最近运行\n"
-        for r in runs:
-            icon = "✅" if r["status"] == "success" else "❌"
-            welcome += f"- {icon} **{r['name']}** ({r['created_at'][:10]})\n"
+    if not api_key:
+        welcome += "⚠ **请先在左侧 ⚙ 设置面板中配置所选模型的 API Key，否则无法正常对话。**"
     await cl.Message(content=welcome).send()
 
 
 @cl.on_chat_resume
 async def on_chat_resume(thread):
     """Called when user clicks a past thread in the sidebar."""
-    backend = LLM_BACKEND
+    user = cl.user_session.get("user")
+    identifier = user.identifier if user else "default"
+    settings = _load_user_settings(identifier)
+
+    backend = settings.get("active_backend") or LLM_BACKEND
     cfg = LLM_CONFIG.get(backend, LLM_CONFIG["claude"])
-    _build_loop(backend, cfg["api_key_env"], cfg["model"], cfg.get("base_url"))
+    api_key = settings["api_keys"].get(backend, "")
+    cl.user_session.set("active_backend", backend)
+
+    _build_loop(backend, cfg["model"], api_key, cfg.get("base_url"))
     cl.user_session.set("history", [])
     cl.user_session.set("context_notes", [])
     cl.user_session.set("session_files", set())
+    thread_id = thread.get("id", "") if isinstance(thread, dict) else getattr(thread, "id", "")
+    cl.user_session.set("memory_session_id", thread_id or str(uuid.uuid4()))
     _init_session()
+
+    # Inject saved context from the resumed conversation
+    if thread_id and _memory:
+        _inject_resume_context(thread_id)
+
     # Re-send ChatSettings (required for UI context on resume)
+    masked_key = api_key[:6] + "****" + api_key[-4:] if len(api_key) > 10 else api_key
     await cl.ChatSettings([
         Select(id="backend", label="模型后端",
                values=["claude", "openai", "deepseek", "qwen"], initial_value=backend),
-        TextInput(id="api_key", label="API Key（留空则使用 .env 配置）", initial=""),
+        TextInput(id="api_key", label="API Key", initial=masked_key, placeholder="sk-..."),
     ]).send()
     # Do NOT send messages here — Chainlit auto-restores thread messages after hook returns
 
@@ -130,20 +214,80 @@ async def on_chat_resume(thread):
 @cl.on_settings_update
 async def on_settings_update(settings):
     backend = (settings.get("backend") if isinstance(settings, dict) else settings) or LLM_BACKEND
-    api_key = (settings.get("api_key", "") if isinstance(settings, dict) else "").strip()
+    raw_key = (settings.get("api_key", "") if isinstance(settings, dict) else "").strip()
     if backend not in LLM_CONFIG:
         await cl.Message(content=f"❌ 未知后端：`{backend}`").send()
         return
+
+    user = cl.user_session.get("user")
+    identifier = user.identifier if user else "default"
+
+    # Resolve effective API key: new input, or load saved, or empty
+    if raw_key and "*" not in raw_key:
+        api_key = raw_key  # User typed a real key
+    else:
+        # User didn't change the key — load saved key for this backend
+        settings = _load_user_settings(identifier)
+        api_key = settings["api_keys"].get(backend, "")
+
     cfg = LLM_CONFIG[backend]
     model = cfg["model"]
     base_url = cfg.get("base_url")
+
+    # Persist
+    _save_user_backend(identifier, backend)
     if api_key:
-        os.environ["_PLUS_USER_API_KEY"] = api_key
-    else:
-        os.environ["_PLUS_USER_API_KEY"] = os.environ.get(cfg["api_key_env"], "")
-    _build_loop(backend, cfg["api_key_env"], model, base_url)
+        _save_user_api_key(identifier, backend, api_key)
+    cl.user_session.set("active_backend", backend)
+
+    _build_loop(backend, model, api_key, base_url)
     cl.user_session.set("history", [])
-    await cl.Message(content=f"✅ 已切换到 `{backend}`（`{model}`）").send()
+
+    key_status = "✅ 已配置" if api_key else "⚠ 未配置 API Key"
+    await cl.Message(content=f"✅ 已切换到 `{backend}`（`{model}`）—— {key_status}").send()
+
+
+# ── Memory helpers ──────────────────────────────────────────
+
+def _inject_resume_context(thread_id: str):
+    """Load saved conversation context for a resumed thread."""
+    if _memory is None:
+        return
+    summary = _memory.get_summary(thread_id)
+    if not summary:
+        return
+    context_notes: list = cl.user_session.get("context_notes", [])
+    decisions_raw = summary.get("key_decisions_json", "[]")
+    try:
+        decisions = json.loads(decisions_raw) if isinstance(decisions_raw, str) else decisions_raw
+    except json.JSONDecodeError:
+        decisions = []
+    if decisions:
+        lines = ["[恢复会话] 上次对话的关键产出："]
+        for d in decisions:
+            path_note = d.get("path_note", "") if isinstance(d, dict) else str(d)
+            if path_note:
+                lines.append(f"- {path_note}")
+        context_notes.insert(0, "\n".join(lines))
+    cl.user_session.set("context_notes", context_notes)
+
+
+def _save_session_memory(session_id: str, user_msg: str, final_text: str,
+                          context_notes: list[str], history: list[dict]):
+    """Persist conversation summary for cross-session recall."""
+    if _memory is None or not session_id or not final_text:
+        return
+    decisions = []
+    for note in context_notes:
+        if ":" in note and not note.startswith("["):
+            decisions.append({"path_note": note})
+    _memory.save_summary(
+        session_id=session_id,
+        title=user_msg[:100],
+        summary=final_text[:500],
+        messages=history[-20:],
+        decisions=decisions,
+    )
 
 
 # ── Helpers ─────────────────────────────────────────────────
@@ -159,65 +303,6 @@ def _parse_param_value(raw: str, param_type: str):
     if param_type == "number":
         return float(raw)
     return raw
-
-
-async def _llm_parse_intent(user_text: str, event: dict):
-    """Let the LLM parse user intent: confirm, cancel, or modify parameters."""
-    import json
-    tool_name = event["tool"]
-    params = event.get("params", {})
-    tool = _loop.registry.get(tool_name)
-    props = tool.parameters if tool else {}
-
-    param_lines = []
-    for name, pinfo in props.get("properties", {}).items():
-        cur = params.get(name, "<not set>")
-        ptype = pinfo.get("type", "string")
-        desc = pinfo.get("description", "")[:80]
-        param_lines.append(f"  {name} ({ptype}): current={cur}  — {desc}")
-
-    prompt = f"""You are a parameter parser. Analyze the user's response to a confirmation prompt.
-
-Tool: "{tool_name}"
-Parameters:
-{chr(10).join(param_lines)}
-
-User said: "{user_text}"
-
-Return ONLY JSON (no markdown, no explanation):
-- Proceed: {{"action":"confirm"}}
-- Cancel: {{"action":"cancel","reason":"why"}}
-- Modify: {{"action":"modify","changes":{{"param":value}}}}"""
-
-    try:
-        response = await asyncio.to_thread(_loop.llm.chat, [{"role": "user", "content": prompt}], [])
-        content = response.content.strip()
-        if content.startswith("```"):
-            content = content.split("\n", 1)[1].rsplit("\n```", 1)[0]
-        data = json.loads(content)
-        action = data.get("action", "confirm")
-
-        if action == "modify":
-            changes = data.get("changes", {})
-            converted = {}
-            for k, v in changes.items():
-                pinfo = props.get("properties", {}).get(k, {})
-                try:
-                    converted[k] = _parse_param_value(str(v), pinfo.get("type", "string"))
-                except (ValueError, TypeError):
-                    converted[k] = v
-            await cl.Message(content="✅ 已更新: " + ", ".join(f"`{k}={v}`" for k, v in converted.items())).send()
-            return converted
-        elif action == "cancel":
-            await cl.Message(content="⏸ 已取消").send()
-            return {"cancel": True, "message": f"{user_text}（{data.get('reason', '')}）"}
-        else:
-            await cl.Message(content="✅ 按当前参数继续。").send()
-            return {}
-    except Exception as e:
-        logger.warning(f"Intent parse failed: {e}, forwarding to LLM")
-        await cl.Message(content="🤔 已转发给模型处理").send()
-        return {"cancel": True, "message": user_text}
 
 
 async def _handle_uploads(elements: list) -> tuple[str, set]:
@@ -264,6 +349,16 @@ async def _handle_uploads(elements: list) -> tuple[str, set]:
 
 @cl.on_message
 async def on_message(message: cl.Message):
+    # Check that an API key is configured before proceeding
+    api_key = _get_effective_api_key()
+    if not api_key:
+        backend = cl.user_session.get("active_backend", LLM_BACKEND)
+        await cl.Message(
+            content=f"⚠ 当前后端 `{backend}` 尚未配置 API Key。\n"
+                    f"请在左侧 ⚙ 设置面板中填入对应的 API Key 后再开始对话。"
+        ).send()
+        return
+
     history = cl.user_session.get("history", [])
     context_notes = cl.user_session.get("context_notes", [])
     session_files: set = cl.user_session.get("session_files", set())
@@ -281,6 +376,11 @@ async def on_message(message: cl.Message):
         if new_paths:
             names = ", ".join(os.path.basename(p) for p in new_paths)
             user_msg_text = f"(用户刚刚上传了文件: {names})\n{user_msg_text}"
+
+    # Sync to Chainlit's real thread ID (available once first message arrives)
+    chainlit_sid = cl.user_session.get("id", "")
+    if chainlit_sid:
+        cl.user_session.set("memory_session_id", chainlit_sid)
 
     # Build context: only show files from THIS session
     context_notes = [n for n in context_notes
@@ -308,6 +408,7 @@ async def on_message(message: cl.Message):
         if event["type"] == "ask_params":
             tool_name = event["tool"]
             collected = {}
+            cancelled = False
             for pinfo in event["missing"]:
                 desc = pinfo["description"] or f"type: {pinfo['type']}"
                 hint = ""
@@ -315,24 +416,34 @@ async def on_message(message: cl.Message):
                 if existing:
                     hint = f"\n(current: `{existing}` — type a new value or press Enter to keep)"
                 res = await cl.AskUserMessage(
-                    content=f"**`{tool_name}`** needs parameter **`{pinfo['name']}`**\n{desc}{hint}",
+                    content=f"**`{tool_name}`** needs parameter **`{pinfo['name']}`**\n{desc}{hint}\n\n(输入 **cancel** 取消此工具调用)",
                     timeout=600,
                 ).send()
-                if res and res["output"]:
-                    try:
-                        collected[pinfo["name"]] = _parse_param_value(res["output"], pinfo["type"])
-                    except (ValueError, TypeError):
-                        await cl.Message(
-                            content=f"⚠️ Invalid value for `{pinfo['name']}` (expected {pinfo['type']}), skipping."
-                        ).send()
-            await event["queue"].put(collected)
+                if not res or not res.get("output"):
+                    continue
+                raw = res["output"].strip()
+                if raw.lower() in ("取消", "cancel", "stop", "停"):
+                    await cl.Message(content="⏸ 已取消").send()
+                    cancelled = True
+                    break
+                try:
+                    collected[pinfo["name"]] = _parse_param_value(
+                        raw, pinfo["type"])
+                except (ValueError, TypeError):
+                    await cl.Message(
+                        content=f"⚠️ Invalid value for `{pinfo['name']}` (expected {pinfo['type']}), skipping."
+                    ).send()
+            if cancelled:
+                await event["queue"].put({"cancel": True, "message": "用户取消参数输入"})
+            else:
+                await event["queue"].put(collected)
 
         elif event["type"] == "confirm_params":
             res = await cl.AskUserMessage(content=event["text"], timeout=600).send()
-            # Default: cancel if no response (timeout / empty input)
             if not res or not res.get("output") or not res["output"].strip():
                 await cl.Message(content="⏸ 超时或空输入，已取消。请重新给出指令。").send()
                 await event["queue"].put({"cancel": True, "message": "用户未响应确认提示"})
+                continue
 
             raw_output = res["output"].strip()
             raw_lower = raw_output.lower()
@@ -343,9 +454,9 @@ async def on_message(message: cl.Message):
                 await cl.Message(content="⏸ 已取消").send()
                 await event["queue"].put({"cancel": True, "message": raw_output})
             else:
-                await cl.Message(content="🤔 ...").send()
-                modifications = await _llm_parse_intent(raw_output, event)
-                await event["queue"].put(modifications)
+                # Not a simple ok/cancel — cancel tool and forward to main LLM for intelligent handling
+                await cl.Message(content="🤔 已转发给模型处理...").send()
+                await event["queue"].put({"cancel": True, "message": raw_output})
 
         elif event["type"] == "tool_result":
             tr = event["result"]
@@ -391,6 +502,10 @@ async def on_message(message: cl.Message):
     _maybe_save_paths(message.content)
     if final_text:
         _maybe_save_paths(final_text)
+
+    # Persist conversation summary for cross-session recall
+    session_id = cl.user_session.get("memory_session_id", "")
+    _save_session_memory(session_id, message.content, final_text, context_notes, history)
 
 
 def _extract_context_facts(user_msg: str, assistant_msg: str, notes: list[str]):

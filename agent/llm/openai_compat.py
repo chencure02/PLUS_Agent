@@ -6,13 +6,6 @@ from .adapter import BaseLLM, LLMResponse, LLMError
 
 class OpenAICompatAdapter(BaseLLM):
     def __init__(self, config: dict):
-        # Validate required config keys
-        api_key_env = config.get("api_key_env")
-        if not api_key_env:
-            raise ValueError(
-                "Missing required config key 'api_key_env'. "
-                "Set the environment variable name that holds your API key."
-            )
         self.model = config.get("model")
         if not self.model:
             raise ValueError(
@@ -20,9 +13,12 @@ class OpenAICompatAdapter(BaseLLM):
                 "Set the model name (e.g. 'gpt-4o', 'deepseek-chat')."
             )
 
-        api_key = os.getenv(api_key_env, "")
+        # Prefer direct api_key, fall back to env var
+        api_key = config.get("api_key") or os.getenv(config.get("api_key_env", ""), "")
         if not api_key:
-            raise ValueError(f"Environment variable '{api_key_env}' is not set or is empty.")
+            raise ValueError(
+                "No API key provided. Set it via the settings panel or environment variable."
+            )
         self.client = OpenAI(api_key=api_key, base_url=config.get("base_url"))
         self.max_tokens = int(config.get("max_tokens", 4096))
 
@@ -42,6 +38,8 @@ class OpenAICompatAdapter(BaseLLM):
 
         msg = response.choices[0].message
 
+        reasoning = getattr(msg, "reasoning_content", "") or ""
+
         if msg.tool_calls:
             tool_calls = []
             for tc in msg.tool_calls:
@@ -50,6 +48,6 @@ class OpenAICompatAdapter(BaseLLM):
                 except json.JSONDecodeError:
                     args = {}
                 tool_calls.append({"name": tc.function.name, "arguments": args})
-            return LLMResponse(type="tool_call", tool_calls=tool_calls, content=msg.content or "")
+            return LLMResponse(type="tool_call", tool_calls=tool_calls, content=msg.content or "", reasoning_content=reasoning)
 
-        return LLMResponse(type="text", content=msg.content or "")
+        return LLMResponse(type="text", content=msg.content or "", reasoning_content=reasoning)

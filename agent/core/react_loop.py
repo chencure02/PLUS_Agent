@@ -66,12 +66,18 @@ class ReactLoop:
         ]
         tools = self.registry.get_all_llm_format()
 
+        # Persist this run to memory
+        run_name = user_message[:80] + ("..." if len(user_message) > 80 else "")
+        run_id = self.memory.save_run(run_name, [], {}, [])
+        tool_step = 0
+
         for step_idx in range(MAX_REACT_STEPS):
             logger.info(f"ReAct step {step_idx + 1}: calling LLM...")
             response = await asyncio.to_thread(self.llm.chat, messages, tools)
             logger.info(f"ReAct step {step_idx + 1}: LLM response type={response.type}")
 
             if response.type == "text":
+                self.memory.update_run_status(run_id, "success")
                 yield {"type": "text", "content": response.content}
                 return
 
@@ -109,6 +115,9 @@ class ReactLoop:
                             "queue": queue,
                         }
                         answers = await queue.get()
+                        if isinstance(answers, dict) and answers.get("cancel"):
+                            messages.append({"role": "user", "content": answers["message"]})
+                            continue
                         tool_args.update(answers)
 
                     # Step 2: confirm params (skip for tools with confirm_before_execute=False)
@@ -140,9 +149,16 @@ class ReactLoop:
 
                     # Step 3: execute
                     logger.info(f"Executing tool: {tool_name} ...")
+                    tool_step += 1
+                    self.memory.save_step(run_id, tool_name, tool_step, tool_args)
+                    self.memory.update_step_status(run_id, tool_step, "running")
                     result = await asyncio.to_thread(
                         self.registry.execute, tool_name, tool_args
                     )
+                    if result.success:
+                        self.memory.update_step_status(run_id, tool_step, "success")
+                    else:
+                        self.memory.update_step_status(run_id, tool_step, "failed", result.error)
                     logger.info(f"Tool {tool_name} done: success={result.success}")
                     tr = {
                         "tool": tool_name, "params": tool_args,
@@ -162,7 +178,7 @@ class ReactLoop:
                         obs += f"Error: {result.error}\n"
 
                     call_id = f"call_{uuid.uuid4().hex[:12]}"
-                    messages.append({
+                    assistant_msg = {
                         "role": "assistant",
                         "content": None,
                         "tool_calls": [{
@@ -173,7 +189,10 @@ class ReactLoop:
                                 "arguments": json.dumps(tool_args, ensure_ascii=False),
                             }
                         }]
-                    })
+                    }
+                    if response.reasoning_content:
+                        assistant_msg["reasoning_content"] = response.reasoning_content
+                    messages.append(assistant_msg)
                     messages.append({
                         "role": "tool",
                         "content": obs,
@@ -181,4 +200,5 @@ class ReactLoop:
                     })
                 continue
 
+        self.memory.update_run_status(run_id, "failed", f"Reached max steps ({MAX_REACT_STEPS})")
         yield {"type": "text", "content": f"Reached max steps ({MAX_REACT_STEPS})."}

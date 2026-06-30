@@ -24,21 +24,16 @@ env/
 # Runtime data
 data/*.db
 
-# User uploads (keep dirs, ignore content)
-uploads/lulc/*
-uploads/drivers/*
-uploads/constraints/*
-!uploads/lulc/.gitkeep
-!uploads/drivers/.gitkeep
-!uploads/constraints/.gitkeep
+# Workspace (per-user uploads/outputs)
+/workspaces/
 
-# Outputs (keep dir, ignore content)
-outputs/*
-!outputs/.gitkeep
+# PLUS backend (C++ binaries, DLLs, batch scripts — cloned separately)
+/plus-backend/
+
+# Chainlit auto-generated translations
+.chainlit/translations/
 
 # OS files
 .DS_Store
 Thumbs.db
 
-# Chainlit auto-generated translations
-.chainlit/translations/

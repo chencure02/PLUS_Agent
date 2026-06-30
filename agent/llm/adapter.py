@@ -14,6 +14,7 @@ class LLMResponse:
     type: Literal["text", "tool_call", "ask_user"]
     content: str = ""
     tool_calls: list[dict] = field(default_factory=list)
+    reasoning_content: str = ""
 
 
 class BaseLLM(ABC):
