@@ -1,6 +1,6 @@
 # agent/tools/convert.py
 from agent.tools.base import BaseTool, ToolResult
-from agent.tools import write_tmp, run_bat
+from agent.tools import run_plus_job
 
 
 class ConvertTool(BaseTool):
@@ -23,8 +23,17 @@ class ConvertTool(BaseTool):
         tmp = f"<Input number>\n{n}\n<Input LULC series>\n"
         tmp += "\n".join(params["input_paths"]) + "\n"
         tmp += "<Output LULC series>\n" + "\n".join(params["output_paths"]) + "\n"
-        write_tmp("PLUS_Convert.tmp", tmp)
-        rc, stdout, stderr = run_bat("convert.bat")
+        rc, stdout, stderr = run_plus_job("PLUS_Convert.tmp", tmp, "convert.bat")
         if rc != 0:
             return ToolResult(success=False, error=f"Convert failed (rc={rc}): {stderr}")
-        return ToolResult(success=True, message=f"Converted {n} rasters", output_paths=params["output_paths"])
+        outputs = list(params["output_paths"])
+        artifacts = {"converted_lulc_paths": outputs}
+        if outputs:
+            artifacts["early_lulc"] = outputs[0]
+            artifacts["late_lulc"] = outputs[-1]
+        return ToolResult(
+            success=True,
+            message=f"Converted {n} rasters",
+            output_paths=outputs,
+            artifacts=artifacts,
+        )

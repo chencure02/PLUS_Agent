@@ -2,7 +2,7 @@ import csv
 import os
 import shutil
 from agent.tools.base import BaseTool, ToolResult
-from agent.tools import write_tmp, run_bat
+from agent.tools import locked_plus_backend, run_bat, write_tmp
 from agent.config import CPP_DIR
 
 
@@ -30,28 +30,33 @@ class MarkovTool(BaseTool):
             f"<End Year>\n{params['end_year']}\n"
             f"<Predict Year>\n{params['predict_year']}\n"
         )
-        write_tmp("PLUS_Markov.tmp", tmp)
-        rc, stdout, stderr = run_bat("markov.bat")
-        if rc != 0:
-            return ToolResult(success=False, error=f"Markov failed (rc={rc}): {stderr}")
-
-        src = str(CPP_DIR / "output" / "markov.csv")
-        if not os.path.exists(src):
-            return ToolResult(success=False, error=f"Markov output not found at {src}")
-
         output_dir = os.path.abspath(params["output_dir"])
         os.makedirs(output_dir, exist_ok=True)
         dst = os.path.join(output_dir, "markov.csv")
-        if os.path.exists(dst):
-            os.remove(dst)
-        shutil.move(src, dst)
+
+        with locked_plus_backend():
+            write_tmp("PLUS_Markov.tmp", tmp)
+            rc, stdout, stderr = run_bat("markov.bat")
+            if rc != 0:
+                return ToolResult(success=False, error=f"Markov failed (rc={rc}): {stderr}")
+
+            src = str(CPP_DIR / "output" / "markov.csv")
+            if not os.path.exists(src):
+                return ToolResult(success=False, error=f"Markov output not found at {src}")
+
+            if os.path.exists(dst):
+                os.remove(dst)
+            shutil.move(src, dst)
 
         demand_str = self._extract_demand(dst, params["predict_year"])
 
         msg = f"Markov prediction for {params['predict_year']} complete."
         if demand_str:
             msg += f"\nCARS yearly_demands = `{demand_str}`"
-        return ToolResult(success=True, message=msg, output_paths=[dst])
+        artifacts = {"markov_csv": dst}
+        if demand_str:
+            artifacts["yearly_demands"] = demand_str
+        return ToolResult(success=True, message=msg, output_paths=[dst], artifacts=artifacts)
 
     @staticmethod
     def _extract_demand(csv_path: str, predict_year: int) -> str | None:

@@ -1,5 +1,7 @@
 # API keys & secrets
 .env
+.env.*
+!.env.example
 
 # Claude internal files
 .files/
@@ -23,17 +25,48 @@ env/
 
 # Runtime data
 data/*.db
+.chainlit/*.db
 
 # Workspace (per-user uploads/outputs)
 /workspaces/
+/outputs/
 
-# PLUS backend (C++ binaries, DLLs, batch scripts — cloned separately)
-/plus-backend/
+# GeoScene preview cache generated at runtime
+/public/geoscene/*.png
 
 # Chainlit auto-generated translations
 .chainlit/translations/
 
+# Contest and delivery bundles generated locally
+/contest_staging/
+/delivery_assets/
+/evaluation_reports/
+/scripts/prepare_contest_package.py
+/scripts/make_ascii_contest_package.py
+/scripts/update_contest_fast_install.py
+/scripts/capture_contest_screenshots.mjs
+*.zip
+*.7z
+*.rar
+
+# PLUS backend runtime binaries and generated artifacts.
+# Keep source/configuration files, but do not publish third-party executables,
+# DLLs, temporary parameter files, model files, or simulation outputs.
+plus-backend/cpp/*.exe
+plus-backend/cpp/*.dll
+plus-backend/cpp/output/
+plus-backend/*.tmp
+plus-backend/Contribution*.csv
+plus-backend/TrainData*.csv
+plus-backend/TransitionMatrix_*.csv
+plus-backend/FitFormula.csv
+plus-backend/FoM.csv
+plus-backend/Kappa.csv
+plus-backend/PredictDemand.csv
+plus-backend/accuracy_record_rf.txt
+plus-backend/imageminmax.txt
+plus-backend/*.model
+
 # OS files
 .DS_Store
 Thumbs.db
-

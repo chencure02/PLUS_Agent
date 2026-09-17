@@ -14,7 +14,10 @@ Environment variables:
     DASHSCOPE_API_KEY - Qwen API key
 """
 import os
+import re
 import sys
+import base64
+import math
 from pathlib import Path
 
 # Force matplotlib non-interactive backend BEFORE any other imports
@@ -35,6 +38,18 @@ if not os.environ.get("PLUS_MEMORY_DB"):
 # Both are required for the chat history sidebar
 import chainlit as cl  # noqa: E402
 from chainlit.data.sql_alchemy import SQLAlchemyDataLayer  # noqa: E402
+from chainlit.auth.jwt import decode_jwt  # noqa: E402
+from chainlit.server import app  # noqa: E402
+from chainlit.session import WebsocketSession  # noqa: E402
+from fastapi import HTTPException, Request  # noqa: E402
+
+try:
+    import aiosqlite  # noqa: F401, E402
+except ModuleNotFoundError as exc:
+    raise RuntimeError(
+        "PLUS Agent requires aiosqlite for Chainlit login and chat history. "
+        "Install dependencies with: python -m pip install -r requirements.txt"
+    ) from exc
 
 _db_path = str(Path(__file__).resolve().parent.parent / ".chainlit" / "chainlit.db")
 
@@ -106,11 +121,220 @@ with _sync_engine.connect() as _conn:
     _conn.commit()
 _sync_engine.dispose()
 
-# Per-user workspace directories
-def _user_workspace(identifier: str) -> dict:
-    """Return per-user upload/output directories."""
-    base = _project_root / "workspaces" / identifier.replace("@", "_at_").replace(".", "_")
+DATA_EXTENSIONS = {".tif", ".tiff", ".csv", ".txt", ".json"}
+
+
+def _path_id(path: Path) -> str:
+    raw = str(path.resolve()).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _path_from_id(value: str) -> Path:
+    padding = "=" * (-len(value) % 4)
+    decoded = base64.urlsafe_b64decode((value + padding).encode("ascii"))
+    return Path(decoded.decode("utf-8")).resolve()
+
+
+def _request_user_identifier(request: Request) -> str:
+    token = request.cookies.get("access_token")
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        user = decode_jwt(token)
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="Invalid authentication") from exc
+    identifier = getattr(user, "identifier", "") or ""
+    if not identifier:
+        raise HTTPException(status_code=401, detail="Invalid user")
+    return identifier
+
+
+def _workspace_root_for_user(identifier: str) -> Path:
+    return (_project_root / "workspaces" / _safe_workspace_segment(identifier)).resolve()
+
+
+def _workspace_roots_for_user(identifier: str) -> list[Path]:
+    roots = [_workspace_root_for_user(identifier)]
+    legacy = (_project_root / "workspaces" / identifier.replace("@", "_at_").replace(".", "_")).resolve()
+    if legacy not in roots:
+        roots.append(legacy)
+    return roots
+
+
+def _current_request_thread_id(request: Request) -> str | None:
+    thread_id = (request.query_params.get("thread_id") or "").strip()
+    if thread_id:
+        return thread_id
+
+    session_id = request.cookies.get("X-Chainlit-Session-id")
+    if not session_id:
+        return None
+    session = WebsocketSession.get_by_id(session_id)
+    if session and session.thread_id:
+        return session.thread_id
+    return None
+
+
+def _thread_workspace_root(identifier: str, thread_id: str) -> Path:
+    return _workspace_root_for_user(identifier) / "threads" / _safe_workspace_segment(thread_id, "default")
+
+
+def _ensure_user_file(identifier: str, file_id: str, thread_id: str | None = None) -> Path:
+    roots = [_thread_workspace_root(identifier, thread_id)] if thread_id else _workspace_roots_for_user(identifier)
+    path = _path_from_id(file_id)
+    if not path.exists() or path.suffix.lower() not in DATA_EXTENSIONS:
+        raise HTTPException(status_code=404, detail="File not found")
+    for root in roots:
+        try:
+            path.relative_to(root)
+            return path
+        except ValueError:
+            continue
+    raise HTTPException(status_code=403, detail="File is outside this user's workspace")
+
+
+def _file_role(path: Path) -> str:
+    text = str(path).replace("\\", "/").lower()
+    if "/outputs/" in text:
+        return "output"
+    if "/uploads/lulc/" in text:
+        return "upload_lulc"
+    if "/uploads/drivers/" in text:
+        return "upload_driver"
+    if "/uploads/constraints/" in text:
+        return "upload_constraint"
+    return "file"
+
+
+def _thread_name(thread_id: str) -> str:
+    _engine = sa.create_engine(f"sqlite:///{_db_path}")
+    try:
+        with _engine.connect() as conn:
+            row = conn.execute(
+                sa.text('SELECT name FROM threads WHERE id = :id'),
+                {"id": thread_id},
+            ).fetchone()
+            if row and row[0]:
+                return str(row[0])
+    finally:
+        _engine.dispose()
+    return thread_id
+
+
+def _catalog_files(identifier: str, thread_id: str | None = None) -> list[dict]:
+    if not thread_id:
+        return []
+
+    target_thread = _safe_workspace_segment(thread_id, "default")
+    roots = [_thread_workspace_root(identifier, thread_id)]
+    items = []
+    for root in roots:
+        if not root.exists():
+            continue
+        for path in root.rglob("*"):
+            if not path.is_file() or path.suffix.lower() not in DATA_EXTENSIONS:
+                continue
+            stat = path.stat()
+            items.append({
+                "id": _path_id(path),
+                "name": path.name,
+                "extension": path.suffix.lower(),
+                "kind": "raster" if path.suffix.lower() in {".tif", ".tiff"} else "table" if path.suffix.lower() == ".csv" else "text",
+                "role": _file_role(path),
+                "threadId": thread_id,
+                "threadName": _thread_name(thread_id),
+                "threadDir": target_thread,
+                "size": stat.st_size,
+                "modified": int(stat.st_mtime),
+            })
+    items.sort(key=lambda item: (item["threadName"], item["role"], item["name"].lower()))
+    return items
+
+
+def _json_number(value) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _csv_preview(path: Path) -> dict:
+    import pandas as pd
+    df = pd.read_csv(path)
+    columns = [str(c) for c in df.columns]
+    preview = df.head(200)
+    numeric = df.select_dtypes(include="number")
+    stats = []
+    if not numeric.empty:
+        desc = numeric.describe().round(4)
+        for col in numeric.columns[:16]:
+            stats.append({
+                "name": str(col),
+                "min": _json_number(desc.loc["min", col]),
+                "max": _json_number(desc.loc["max", col]),
+                "mean": _json_number(desc.loc["mean", col]),
+            })
+    return {
+        "kind": "table",
+        "name": path.name,
+        "columns": columns,
+        "rows": preview.fillna("").astype(str).values.tolist(),
+        "rowCount": int(len(df)),
+        "columnCount": int(len(columns)),
+        "stats": stats,
+    }
+
+
+@app.get("/plus/data-catalog")
+async def plus_data_catalog(request: Request):
+    identifier = _request_user_identifier(request)
+    thread_id = _current_request_thread_id(request)
+    return {"threadId": thread_id, "items": _catalog_files(identifier, thread_id)}
+
+
+@app.get("/plus/data-preview/{file_id}")
+async def plus_data_preview(file_id: str, request: Request):
+    identifier = _request_user_identifier(request)
+    thread_id = _current_request_thread_id(request)
+    if not thread_id:
+        raise HTTPException(status_code=400, detail="No active thread")
+    path = _ensure_user_file(identifier, file_id, thread_id)
+    ext = path.suffix.lower()
+    if ext in {".tif", ".tiff"}:
+        from agent.ui.renderers import _build_geoscene_preview
+        props = _build_geoscene_preview(str(path), path.name)
+        return {"kind": "raster", "name": path.name, "props": props}
+    if ext == ".csv":
+        return _csv_preview(path)
+    text = path.read_text(encoding="utf-8", errors="replace")
+    return {"kind": "text", "name": path.name, "content": text[:20000]}
+
+
+def _prioritize_plus_routes() -> None:
+    routes = list(app.router.routes)
+    plus_routes = [route for route in routes if getattr(route, "path", "").startswith("/plus/")]
+    other_routes = [route for route in routes if route not in plus_routes]
+    app.router.routes[:] = plus_routes + other_routes
+
+
+_prioritize_plus_routes()
+
+def _safe_workspace_segment(value: str, fallback: str = "default") -> str:
+    """Return a filesystem-safe path segment for user and thread workspace names."""
+    segment = re.sub(r"[^A-Za-z0-9_.-]+", "_", (value or "").strip())
+    segment = segment.strip("._-")
+    return (segment or fallback)[:96]
+
+
+# Per-thread workspace directories
+def _user_workspace(identifier: str, thread_id: str | None = None) -> dict:
+    """Return per-user, per-thread upload/output directories."""
+    safe_user = _safe_workspace_segment(identifier)
+    safe_thread = _safe_workspace_segment(thread_id or "default", "default")
+    base = _project_root / "workspaces" / safe_user / "threads" / safe_thread
     dirs = {
+        "root": base,
         "uploads_lulc": base / "uploads" / "lulc",
         "uploads_drivers": base / "uploads" / "drivers",
         "uploads_constraints": base / "uploads" / "constraints",

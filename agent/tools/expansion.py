@@ -2,7 +2,7 @@
 import os
 
 from agent.tools.base import BaseTool, ToolResult
-from agent.tools import write_tmp, run_bat
+from agent.tools import run_plus_job
 
 
 class ExpansionTool(BaseTool):
@@ -20,8 +20,7 @@ class ExpansionTool(BaseTool):
 
     def execute(self, params: dict) -> ToolResult:
         tmp = f"<Input number>\n2\n<Input LULC series>\n{params['early_lulc']}\n{params['late_lulc']}\n<Output change>\n{params['output_change']}\n"
-        write_tmp("PLUS_Expansion.tmp", tmp)
-        rc, stdout, stderr = run_bat("expansion.bat")
+        rc, stdout, stderr = run_plus_job("PLUS_Expansion.tmp", tmp, "expansion.bat")
         if rc != 0:
             return ToolResult(success=False, error=f"Expansion failed (rc={rc}): {stderr}")
 
@@ -30,9 +29,18 @@ class ExpansionTool(BaseTool):
         base = os.path.splitext(os.path.basename(params["output_change"]))[0]
         actual = os.path.join(os.path.abspath(out_dir), f"{base}_landuse_1to2.tif")
         if os.path.exists(actual):
-            return ToolResult(success=True, message="Expansion map generated", output_paths=[actual])
+            return ToolResult(
+                success=True,
+                message="Expansion map generated",
+                output_paths=[actual],
+                artifacts={"expansion_raster": actual},
+            )
         # Fallback: check if the original path exists
         if os.path.exists(params["output_change"]):
-            return ToolResult(success=True, message="Expansion map generated", output_paths=[params["output_change"]])
+            return ToolResult(
+                success=True,
+                message="Expansion map generated",
+                output_paths=[params["output_change"]],
+                artifacts={"expansion_raster": params["output_change"]},
+            )
         return ToolResult(success=False, error=f"Expansion output not found: expected {actual}")
-

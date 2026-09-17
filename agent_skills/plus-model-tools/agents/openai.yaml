@@ -1,0 +1,4 @@
+interface:
+  display_name: "PLUS 模型工具"
+  short_description: "执行 PLUS 土地利用模拟的 tmp/bat 模块"
+  default_prompt: "使用 $plus-model-tools 帮我运行 PLUS 模型并整理输出结果。"

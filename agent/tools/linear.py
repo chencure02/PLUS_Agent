@@ -1,6 +1,6 @@
 # agent/tools/linear.py
 from agent.tools.base import BaseTool, ToolResult
-from agent.tools import write_tmp, run_bat
+from agent.tools import run_plus_job
 
 
 class LinearTool(BaseTool):
@@ -19,8 +19,7 @@ class LinearTool(BaseTool):
         image_amount = len(params["image_paths"])
         tmp = f"<Image Amount>\n{image_amount}\n<Predict Amount>\n{params['predict_amount']}\n<Images Path>\n"
         tmp += "\n".join(params["image_paths"]) + "\n"
-        write_tmp("PLUS_Linear.tmp", tmp)
-        rc, stdout, stderr = run_bat("linear.bat")
+        rc, stdout, stderr = run_plus_job("PLUS_Linear.tmp", tmp, "linear.bat")
         if rc != 0:
             return ToolResult(success=False, error=f"Linear failed (rc={rc}): {stderr}")
         output = stdout[:2000] + ("...(truncated)" if len(stdout) > 2000 else "")

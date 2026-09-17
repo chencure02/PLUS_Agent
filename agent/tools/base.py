@@ -10,6 +10,7 @@ class ToolResult:
     message: str = ""
     output_paths: list[str] = field(default_factory=list)
     error: str = ""
+    artifacts: dict = field(default_factory=dict)
 
 
 class BaseTool(ABC):

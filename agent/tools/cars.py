@@ -1,7 +1,7 @@
 # agent/tools/cars.py
 import os, glob
 from agent.tools.base import BaseTool, ToolResult
-from agent.tools import write_tmp, run_bat
+from agent.tools import run_plus_job
 
 
 class CARSTool(BaseTool):
@@ -46,8 +46,7 @@ class CARSTool(BaseTool):
             f"<Percentage of seeds>\n{params.get('seed_percentage', 0.1)}\n"
             f"<Development type exist>\n0\n<Development type>\n0\n<Development weight>\n0.5\n"
         )
-        write_tmp("PLUS_CARS.tmp", tmp)
-        rc, stdout, stderr = run_bat("cars.bat")
+        rc, stdout, stderr = run_plus_job("PLUS_CARS.tmp", tmp, "cars.bat")
         if rc != 0:
             return ToolResult(success=False, error=f"CARS failed (rc={rc}): {stderr}")
 
@@ -56,5 +55,10 @@ class CARSTool(BaseTool):
         base = os.path.splitext(os.path.basename(params["output_simulation"]))[0]
         matches = sorted(glob.glob(os.path.join(out_dir, f"{base}Simulation_*.tif")))
         if matches and os.path.exists(matches[0]):
-            return ToolResult(success=True, message="CARS simulation complete", output_paths=[matches[0]])
+            return ToolResult(
+                success=True,
+                message="CARS simulation complete",
+                output_paths=[matches[0]],
+                artifacts={"simulation_raster": matches[0]},
+            )
         return ToolResult(success=False, error=f"CARS: no output file found matching {out_dir}/{base}Simulation_*.tif")

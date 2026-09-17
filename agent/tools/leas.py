@@ -3,7 +3,7 @@ import glob as glob_mod
 import os
 import shutil
 from agent.tools.base import BaseTool, ToolResult
-from agent.tools import write_tmp, run_bat
+from agent.tools import locked_plus_backend, run_bat, write_tmp
 from agent.config import PLUS_BACKEND
 
 
@@ -37,39 +37,49 @@ class LEASTool(BaseTool):
             f"<Input thread count>\n{params.get('thread_count', 8)}\n"
             f"<High precision>\n0\n<Update Number>\n0\n<Update Variable>\n0\n"
         )
-        write_tmp("PLUS_LEAS.tmp", tmp)
-        rc, stdout, stderr = run_bat("leas.bat")
-        if rc != 0:
-            return ToolResult(success=False, error=f"LEAS failed (rc={rc}): {stderr}")
+        with locked_plus_backend():
+            write_tmp("PLUS_LEAS.tmp", tmp)
+            rc, stdout, stderr = run_bat("leas.bat")
+            if rc != 0:
+                return ToolResult(success=False, error=f"LEAS failed (rc={rc}): {stderr}")
 
-        base = params["output_probability"]
-        output_dir = os.path.dirname(os.path.abspath(base))
-        base_name = os.path.splitext(os.path.basename(base))[0]
-        outputs = []
+            base = params["output_probability"]
+            output_dir = os.path.dirname(os.path.abspath(base))
+            base_name = os.path.splitext(os.path.basename(base))[0]
+            outputs = []
 
-        # Move PLUS_BACKEND-generated files to user's output directory
-        for filename in ["accuracy_record_rf.txt", "imageminmax.txt"]:
-            src = str(PLUS_BACKEND / filename)
-            if os.path.exists(src):
-                dst = os.path.join(output_dir, filename)
+            # Move PLUS_BACKEND-generated files to user's output directory before another job starts.
+            for filename in ["accuracy_record_rf.txt", "imageminmax.txt"]:
+                src = str(PLUS_BACKEND / filename)
+                if os.path.exists(src):
+                    dst = os.path.join(output_dir, filename)
+                    if os.path.exists(dst):
+                        os.remove(dst)
+                    shutil.move(src, dst)
+                    outputs.append(dst)
+
+            # Contribution CSVs (one per land use type)
+            for src in sorted(glob_mod.glob(str(PLUS_BACKEND / "Contribution*.csv"))):
+                dst = os.path.join(output_dir, os.path.basename(src))
                 if os.path.exists(dst):
                     os.remove(dst)
                 shutil.move(src, dst)
                 outputs.append(dst)
 
-        # Contribution CSVs (one per land use type)
-        for src in sorted(glob_mod.glob(str(PLUS_BACKEND / "Contribution*.csv"))):
-            dst = os.path.join(output_dir, os.path.basename(src))
-            if os.path.exists(dst):
-                os.remove(dst)
-            shutil.move(src, dst)
-            outputs.append(dst)
-
-        # Probability bands (generated directly in output_dir by PLUS.exe)
-        pattern = os.path.join(output_dir, f"{base_name}_band_*.tif")
-        bands = sorted(glob_mod.glob(pattern))
-        outputs.extend(bands)
+            # Probability bands (generated directly in output_dir by PLUS.exe)
+            pattern = os.path.join(output_dir, f"{base_name}_band_*.tif")
+            bands = sorted(glob_mod.glob(pattern))
+            outputs.extend(bands)
 
         band_count = len(bands)
-        csv_count = len([o for o in outputs if "Contribution" in o])
-        return ToolResult(success=True, message=f"LEAS: {band_count} probability bands, {csv_count} contribution tables generated", output_paths=outputs)
+        contribution_tables = [o for o in outputs if "Contribution" in o]
+        csv_count = len(contribution_tables)
+        return ToolResult(
+            success=True,
+            message=f"LEAS: {band_count} probability bands, {csv_count} contribution tables generated",
+            output_paths=outputs,
+            artifacts={
+                "probability_paths": list(bands),
+                "contribution_tables": contribution_tables,
+            },
+        )

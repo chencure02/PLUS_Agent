@@ -1,5 +1,7 @@
+import hashlib
 import os
 import tempfile
+from pathlib import Path
 
 # Force non-interactive backend BEFORE any other matplotlib import (tkinter crashes in threads)
 import matplotlib
@@ -8,7 +10,7 @@ matplotlib.use("Agg")
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap, BoundaryNorm
-from osgeo import gdal
+from osgeo import gdal, osr
 import folium
 from folium.raster_layers import ImageOverlay
 import chainlit as cl
@@ -26,11 +28,21 @@ LULC_COLORS = ['#000000', '#FF0000', '#00FF00', '#0000FF', '#FFFF00',
 CHART_COLORS = ['#2196F3', '#4CAF50', '#FF9800', '#E91E63', '#9C27B0',
                 '#00BCD4', '#FF5722', '#795548', '#607D8B', '#CDDC39']
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PUBLIC_GEOSCENE_DIR = PROJECT_ROOT / "public" / "geoscene"
+PUBLIC_GEOSCENE_URL = "/public/geoscene"
+MAX_PREVIEW_SIZE = 2200
+GEOSCENE_PREVIEW_VERSION = "v2"
+
 
 def render_raster(tif_path: str, title: str = ""):  # -> cl.Image | cl.Html | cl.Text
-    """Render GeoTIFF as Folium interactive map. Fallback: Matplotlib static image."""
+    """Render GeoTIFF with GeoScene. Fallback: Folium, then Matplotlib static image."""
     if not os.path.exists(tif_path):
         return cl.Text(content=f"[File not found: {os.path.basename(tif_path)}]")
+    try:
+        return _render_geoscene(tif_path, title)
+    except Exception:
+        pass
     try:
         return _render_folium(tif_path, title)
     except Exception:
@@ -38,6 +50,168 @@ def render_raster(tif_path: str, title: str = ""):  # -> cl.Image | cl.Html | cl
             return _render_matplotlib(tif_path, title)
         except Exception:
             return cl.Text(content=f"[Raster: {os.path.basename(tif_path)}]")
+
+
+def _render_geoscene(tif_path: str, title: str):  # -> cl.CustomElement
+    props = _build_geoscene_preview(tif_path, title)
+    return cl.CustomElement(
+        name="GeoSceneRaster",
+        display="side",
+        size="large",
+        props=props,
+    )
+
+
+def _build_geoscene_preview(tif_path: str, title: str = "") -> dict:
+    """Prepare a browser-readable raster preview and map metadata for GeoScene."""
+    path = Path(tif_path)
+    if not path.exists():
+        raise FileNotFoundError(tif_path)
+
+    ds = gdal.Open(str(path))
+    if ds is None:
+        raise ValueError(f"Cannot open raster: {tif_path}")
+
+    gt = ds.GetGeoTransform(can_return_null=True)
+    if not gt:
+        ds = None
+        raise ValueError(f"Raster has no geotransform: {tif_path}")
+
+    bounds = _bounds_wgs84(ds, gt)
+    band = ds.GetRasterBand(1)
+    data = band.ReadAsArray()
+    nodata = band.GetNoDataValue()
+    raster_size = [int(ds.RasterXSize), int(ds.RasterYSize)]
+    projection = ds.GetProjection() or ""
+    ds = None
+
+    if data is None:
+        raise ValueError(f"Raster band is empty: {tif_path}")
+
+    data = _downsample(data)
+    image, legend, stats, renderer = _colorize_raster(data, nodata, path.name)
+
+    PUBLIC_GEOSCENE_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = f"{GEOSCENE_PREVIEW_VERSION}|{path.resolve()}|{path.stat().st_mtime_ns}|{path.stat().st_size}"
+    digest = hashlib.sha1(stamp.encode("utf-8")).hexdigest()[:16]
+    image_name = f"{path.stem}_{digest}.png"
+    image_path = PUBLIC_GEOSCENE_DIR / image_name
+    if not image_path.exists():
+        plt.imsave(str(image_path), image)
+
+    return {
+        "title": title or path.name,
+        "imageUrl": f"{PUBLIC_GEOSCENE_URL}/{image_name}",
+        "bounds": bounds,
+        "opacity": 0.72,
+        "legend": legend,
+        "stats": stats,
+        "renderer": renderer,
+        "rasterSize": raster_size,
+        "sourceName": path.name,
+        "projection": projection[:120],
+    }
+
+
+def _downsample(data: np.ndarray) -> np.ndarray:
+    rows, cols = data.shape[:2]
+    scale = max(1, int(np.ceil(max(rows, cols) / MAX_PREVIEW_SIZE)))
+    if scale > 1:
+        return data[::scale, ::scale]
+    return data
+
+
+def _colorize_raster(data: np.ndarray, nodata, source_name: str = ""):
+    values = data.astype(float, copy=False)
+    valid = np.isfinite(values)
+    if nodata is not None:
+        valid &= values != float(nodata)
+
+    if not np.any(valid):
+        raise ValueError("Raster has no valid cells")
+
+    valid_values = values[valid]
+    sample_step = max(1, int(np.ceil(valid_values.size / 100000)))
+    sampled_values = valid_values[::sample_step]
+    unique = np.unique(sampled_values)
+    continuous_hint = any(token in source_name.lower() for token in ("probability", "potential", "band"))
+    is_categorical = (
+        not continuous_hint
+        and len(unique) <= 32
+        and np.allclose(unique, np.round(unique))
+    )
+
+    if is_categorical:
+        classes = [int(v) for v in unique]
+        colors = LULC_COLORS[:len(classes)]
+        if len(classes) > len(colors):
+            colors = ['#%06X' % ((i * 123457) % 0xFFFFFF) for i in range(len(classes))]
+        cmap = ListedColormap(colors)
+        index = np.zeros(values.shape, dtype=int)
+        for i, cls in enumerate(classes):
+            index[values == cls] = i
+        rgba = cmap(index)
+        legend = [{"value": cls, "color": colors[i], "label": f"Class {cls}"} for i, cls in enumerate(classes)]
+        renderer = "categorical"
+    else:
+        lower, upper = np.nanpercentile(valid_values, [2, 98])
+        if lower == upper:
+            lower = float(np.nanmin(valid_values))
+            upper = float(np.nanmax(valid_values))
+        if lower == upper:
+            upper = lower + 1.0
+        normalized = np.clip((values - lower) / (upper - lower), 0, 1)
+        cmap = plt.get_cmap("viridis")
+        rgba = cmap(normalized)
+        legend = [
+            {"value": float(lower), "color": "#440154", "label": f"{lower:.3g}"},
+            {"value": float((lower + upper) / 2), "color": "#21918c", "label": f"{((lower + upper) / 2):.3g}"},
+            {"value": float(upper), "color": "#fde725", "label": f"{upper:.3g}"},
+        ]
+        renderer = "continuous"
+
+    rgba = np.asarray(rgba)
+    rgba[..., 3] = np.where(valid, 1.0, 0.0)
+    image = (rgba * 255).astype(np.uint8)
+    stats = {
+        "min": float(np.nanmin(valid_values)),
+        "max": float(np.nanmax(valid_values)),
+        "validCells": int(valid_values.size),
+        "classCount": int(len(unique)) if is_categorical else None,
+    }
+    return image, legend, stats, renderer
+
+
+def _bounds_wgs84(ds, gt) -> dict:
+    width, height = ds.RasterXSize, ds.RasterYSize
+    corners = [
+        _pixel_to_map(gt, 0, 0),
+        _pixel_to_map(gt, width, 0),
+        _pixel_to_map(gt, width, height),
+        _pixel_to_map(gt, 0, height),
+    ]
+
+    projection = ds.GetProjection()
+    if projection:
+        source = osr.SpatialReference()
+        source.ImportFromWkt(projection)
+        target = osr.SpatialReference()
+        target.ImportFromEPSG(4326)
+        if hasattr(source, "SetAxisMappingStrategy"):
+            source.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+            target.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+        transform = osr.CoordinateTransformation(source, target)
+        corners = [transform.TransformPoint(x, y)[:2] for x, y in corners]
+
+    xs = [float(p[0]) for p in corners]
+    ys = [float(p[1]) for p in corners]
+    return {"xmin": min(xs), "ymin": min(ys), "xmax": max(xs), "ymax": max(ys), "wkid": 4326}
+
+
+def _pixel_to_map(gt, px, py) -> tuple[float, float]:
+    x = gt[0] + px * gt[1] + py * gt[2]
+    y = gt[3] + px * gt[4] + py * gt[5]
+    return x, y
 
 
 def _render_folium(tif_path: str, title: str):  # -> cl.Html

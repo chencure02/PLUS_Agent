@@ -75,4 +75,8 @@ class NeighborhoodWeightTool(BaseTool):
             f"{detail}\n\n"
             f"CARS Neighborhood Weight = `{weight_str}`"
         )
-        return ToolResult(success=True, message=msg)
+        return ToolResult(
+            success=True,
+            message=msg,
+            artifacts={"neighborhood_weights": weight_str},
+        )

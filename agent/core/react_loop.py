@@ -50,7 +50,14 @@ class ReactLoop:
         self.registry = registry
         self.memory = memory
 
-    async def run(self, user_message: str, history: list[dict], context_notes: list[str] | None = None):
+    async def run(
+        self,
+        user_message: str,
+        history: list[dict],
+        context_notes: list[str] | None = None,
+        user_id: str = "",
+        thread_id: str = "",
+    ):
         """Async generator that yields events."""
         # Build system prompt with pinned context facts
         system_content = SYSTEM_PROMPT
@@ -68,7 +75,7 @@ class ReactLoop:
 
         # Persist this run to memory
         run_name = user_message[:80] + ("..." if len(user_message) > 80 else "")
-        run_id = self.memory.save_run(run_name, [], {}, [])
+        run_id = self.memory.save_run(run_name, [], {}, [], user_id=user_id, thread_id=thread_id)
         tool_step = 0
 
         for step_idx in range(MAX_REACT_STEPS):
@@ -164,6 +171,7 @@ class ReactLoop:
                         "tool": tool_name, "params": tool_args,
                         "success": result.success, "message": result.message,
                         "output_paths": result.output_paths, "error": result.error,
+                        "artifacts": result.artifacts,
                     }
                     yield {"type": "tool_result", "result": tr}
 
@@ -174,6 +182,8 @@ class ReactLoop:
                     )
                     if result.output_paths:
                         obs += f"Output files: {', '.join(result.output_paths)}\n"
+                    if result.artifacts:
+                        obs += f"Structured artifacts: {json.dumps(result.artifacts, ensure_ascii=False)}\n"
                     if result.error:
                         obs += f"Error: {result.error}\n"
 

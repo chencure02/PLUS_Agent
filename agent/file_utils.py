@@ -28,21 +28,29 @@ def make_output_dir() -> str:
     return str(d)
 
 
-def scan_uploads() -> dict:
+def scan_uploads(
+    lulc_dir: Path | str = LULC_DIR,
+    drivers_dir: Path | str = DRIVERS_DIR,
+    constraints_dir: Path | str = CONSTRAINTS_DIR,
+) -> dict:
     """Scan uploads/ and return absolute paths. LLM must use these exact paths."""
-    ensure_dirs()
-    lulc = sorted([str(f.resolve()) for f in LULC_DIR.glob("*.tif")])
-    drivers = sorted([str(f.resolve()) for f in DRIVERS_DIR.glob("*.tif")])
-    constraints = sorted([str(f.resolve()) for f in CONSTRAINTS_DIR.glob("*.tif")])
+    lulc_dir = Path(lulc_dir)
+    drivers_dir = Path(drivers_dir)
+    constraints_dir = Path(constraints_dir)
+    for d in [lulc_dir, drivers_dir, constraints_dir]:
+        os.makedirs(d, exist_ok=True)
+    lulc = _scan_rasters(lulc_dir)
+    drivers = _scan_rasters(drivers_dir)
+    constraints = _scan_rasters(constraints_dir)
     return {
         "lulc_files": lulc,
         "driver_files": drivers,
         "constraint_files": constraints,
         "lulc_count": len(lulc),
         "driver_count": len(drivers),
-        "lulc_dir": str(LULC_DIR.resolve()),
-        "drivers_dir": str(DRIVERS_DIR.resolve()),
-        "constraints_dir": str(CONSTRAINTS_DIR.resolve()),
+        "lulc_dir": str(lulc_dir.resolve()),
+        "drivers_dir": str(drivers_dir.resolve()),
+        "constraints_dir": str(constraints_dir.resolve()),
     }
 
 
@@ -63,18 +71,18 @@ def build_context_note(scan: dict) -> str | None:
 
 def save_uploaded_file(file_element, subdir: Path) -> str | None:
     """Copy a Chainlit file element to the given subdirectory. Returns destination path."""
-    ensure_dirs()
+    subdir.mkdir(parents=True, exist_ok=True)
     src = file_element.path
     if not src or not os.path.exists(src):
         return None
-    dst = subdir / file_element.name
+    dst = _unique_destination(subdir, file_element.name)
     shutil.copy2(src, str(dst))
     return str(dst)
 
 
 def extract_zip_to(zip_path: str, target_dir: Path) -> list[str]:
     """Extract a zip file to target_dir. Returns list of extracted paths."""
-    ensure_dirs()
+    target_dir.mkdir(parents=True, exist_ok=True)
     extracted = []
     with zipfile.ZipFile(zip_path, "r") as zf:
         for member in zf.namelist():
@@ -84,8 +92,28 @@ def extract_zip_to(zip_path: str, target_dir: Path) -> list[str]:
             basename = os.path.basename(member)
             if not basename:
                 continue
-            dst = target_dir / basename
+            dst = _unique_destination(target_dir, basename)
             with zf.open(member) as src, open(dst, "wb") as out:
                 out.write(src.read())
             extracted.append(str(dst))
     return extracted
+
+
+def _unique_destination(directory: Path, filename: str) -> Path:
+    """Return a non-overwriting destination path inside directory."""
+    candidate = directory / filename
+    if not candidate.exists():
+        return candidate
+    stem = candidate.stem
+    suffix = candidate.suffix
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    for i in range(1, 1000):
+        candidate = directory / f"{stem}__{ts}_{i:03d}{suffix}"
+        if not candidate.exists():
+            return candidate
+    raise FileExistsError(f"Could not allocate a unique filename for {filename}")
+
+
+def _scan_rasters(directory: Path) -> list[str]:
+    files = list(directory.glob("*.tif")) + list(directory.glob("*.tiff"))
+    return sorted(str(f.resolve()) for f in files)

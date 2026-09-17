@@ -1,6 +1,6 @@
 # agent/tools/diverse.py
 from agent.tools.base import BaseTool, ToolResult
-from agent.tools import write_tmp, run_bat
+from agent.tools import run_plus_job
 
 
 class DiverseTool(BaseTool):
@@ -20,8 +20,7 @@ class DiverseTool(BaseTool):
         tmp = f"<Image Amount>\n{image_amount}\n<Images Path>\n"
         tmp += "\n".join(params["image_paths"]) + "\n"
         tmp += f"<Output Path>\n{params['output_path']}\n"
-        write_tmp("PLUS_Diverse.tmp", tmp)
-        rc, stdout, stderr = run_bat("diverse.bat")
+        rc, stdout, stderr = run_plus_job("PLUS_Diverse.tmp", tmp, "diverse.bat")
         if rc != 0:
             return ToolResult(success=False, error=f"Diverse failed (rc={rc}): {stderr}")
         return ToolResult(success=True, message="Diversity map generated", output_paths=[params["output_path"]])

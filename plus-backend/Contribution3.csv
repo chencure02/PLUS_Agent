@@ -1,4 +1,0 @@
-RMSE_original, 0.143946
-Factors, Dis_to_TertiaryHistory2.tif,wh_df_dem.tif,wh_df_pre.tif,wh_df_slope.tif,wh_df_tem.tif,wh_dist_gov.tif,wh_dist_highspdstation.tif,wh_dist_highway.tif,wh_dist_openwater.tif,wh_dist_primary.tif,wh_dist_railway.tif,wh_dist_secondary.tif,wh_dist_trunk.tif,wh_gdp2010.tif,wh_Pop.tif,wh_soiltype.tif,
-RMSE_noise, 0.350468,0.271614,0.219314,0.250447,0.203696,0.225315,0.205423,0.272339,0.268279,0.296352,0.311912,0.293888,0.304205,0.249050,0.216743,0.182319,
-Contribution:, 0.113584,0.070216,0.041452,0.058574,0.032862,0.044752,0.033812,0.070614,0.068382,0.083821,0.092379,0.082466,0.088140,0.057806,0.040037,0.021105,
