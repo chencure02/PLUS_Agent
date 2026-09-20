@@ -34,6 +34,37 @@ The goal is not to replace professional modeling judgment. The goal is to make t
 
 ![LEAS probability raster preview](docs/assets/leas-preview.png)
 
+## Usage Walkthrough
+
+These screenshots show how PLUS Agent guides a modeling session from natural-language exploration to a completed PLUS workflow. Local workspace paths are redacted in the public images.
+
+<table>
+  <tr>
+    <td width="50%">
+      <strong>1. Ask what the Agent can do</strong><br>
+      <sub>The chat interface explains supported PLUS modules and keeps the data panel one click away.</sub><br><br>
+      <img src="docs/assets/workflow/01-chat-overview.png" alt="PLUS Agent chat overview" width="100%">
+    </td>
+    <td width="50%">
+      <strong>2. Check uploaded data readiness</strong><br>
+      <sub>The Agent inspects current-session LULC files and points out missing driving factors before LEAS.</sub><br><br>
+      <img src="docs/assets/workflow/02-data-check.png" alt="Uploaded data readiness check" width="100%">
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <strong>3. Review and adjust parameters</strong><br>
+      <sub>Before a module runs, users can accept defaults or edit values such as the random forest tree count.</sub><br><br>
+      <img src="docs/assets/workflow/03-parameter-review.png" alt="PLUS workflow parameter review" width="100%">
+    </td>
+    <td width="50%">
+      <strong>4. Inspect workflow results</strong><br>
+      <sub>The managed workflow reports each completed step and lists key outputs for map/table review.</sub><br><br>
+      <img src="docs/assets/workflow/04-workflow-result.png" alt="Completed PLUS workflow report" width="100%">
+    </td>
+  </tr>
+</table>
+
 ## System Overview
 
 ```mermaid

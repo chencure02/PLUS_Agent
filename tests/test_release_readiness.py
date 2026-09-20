@@ -18,6 +18,20 @@ class ReleaseReadinessTest(unittest.TestCase):
         self.assertTrue(is_forbidden_tracked(".env"))
         self.assertTrue(is_forbidden_tracked(".env.local"))
 
+    def test_readme_includes_workflow_example_gallery(self):
+        readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+        workflow_images = [
+            "docs/assets/workflow/01-chat-overview.png",
+            "docs/assets/workflow/02-data-check.png",
+            "docs/assets/workflow/03-parameter-review.png",
+            "docs/assets/workflow/04-workflow-result.png",
+        ]
+
+        self.assertIn("## Usage Walkthrough", readme)
+        for image_path in workflow_images:
+            self.assertTrue((PROJECT_ROOT / image_path).exists(), image_path)
+            self.assertIn(image_path, readme)
+
 
 if __name__ == "__main__":
     unittest.main()

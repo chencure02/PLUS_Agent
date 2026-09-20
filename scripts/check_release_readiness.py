@@ -22,6 +22,10 @@ REQUIRED_FILES = [
     "docs/assets/upload-preview.png",
     "docs/assets/leas-preview.png",
     "docs/assets/cars-preview.png",
+    "docs/assets/workflow/01-chat-overview.png",
+    "docs/assets/workflow/02-data-check.png",
+    "docs/assets/workflow/03-parameter-review.png",
+    "docs/assets/workflow/04-workflow-result.png",
 ]
 
 FORBIDDEN_TRACKED_PATTERNS = [
